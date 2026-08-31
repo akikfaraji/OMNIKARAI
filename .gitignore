@@ -44,3 +44,6 @@ desktop.ini
 .idea/
 *.suo
 *.user
+
+# Windows-ism artifact files
+NUL
