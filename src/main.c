@@ -4,7 +4,7 @@
 //
 //  Usage:
 //    omnicc run   [--quiet] [--beta] <file.ok>   compile and run (JIT)
-//    omnicc build [--quiet] [--beta] <file.ok>   compile to standalone .exe
+//    omnicc build [--quiet] [--beta] <file.ok>   compile to a standalone exe
 //    omnicc dump  [--quiet] [--beta] <file.ok>   dump x86-64 machine code bytes
 //    omnicc check [--quiet] [--beta] <file.ok>   parse + check only (no run)
 //
@@ -44,11 +44,17 @@ extern int g_beta;
 
 // ── Version banner ───────────────────────────────────────────
 static void print_version(void) {
+#if defined(_WIN32)
+    const char* plat = "Windows";
+#else
+    const char* plat = "Linux/macOS (POSIX)";
+#endif
     fprintf(stderr,
         "Omnikarai Compiler (omnicc) v6.02.24\n"
-        "  x86-64 native code | Windows | No LLVM | No dependencies\n"
+        "  x86-64 native code | %s | No LLVM | No dependencies\n"
         "  Modules: time, datetime, math, os, io, sys, list, str, ai\n"
-        "  Package manager: omnip v6.0.0  |  Registry: https://opi-nine.vercel.app\n"
+        "  Registry: https://opi-nine.vercel.app\n",
+        plat
     );
 }
 
@@ -58,7 +64,8 @@ static void print_usage(void) {
     fprintf(stderr,
         "\nUsage:\n"
         "  omnicc run   [--quiet] [--beta] <file.ok>   compile and run (JIT)\n"
-        "  omnicc build [--quiet] [--beta] <file.ok>   compile to standalone .exe\n"
+        "  omnicc build [--quiet] [--beta] <file.ok>   compile to standalone executable\n"
+        "                                              (embeds runtime + source)\n"
         "  omnicc dump  [--quiet] [--beta] <file.ok>   dump x86-64 machine code bytes\n"
         "  omnicc check [--quiet] [--beta] <file.ok>   parse + check only (no run)\n"
         "  omnicc version                               show version info\n"
@@ -226,112 +233,107 @@ static int cmd_check(const char* filepath) {
 }
 
 // ============================================================
-//  omnicc build — PE32+ standalone .exe emitter
+//  omnicc build — standalone executable emitter
 //
-//  Architecture:
-//    The JIT buffer that omnicc normally copies into VirtualAlloc'd
-//    memory is instead written directly into the .text section of a
-//    PE32+ file.  A small trampoline at the PE entry point calls into
-//    the JIT code.  All Omnikarai runtime helpers (print, time, malloc,
-//    etc.) are called via MOV RAX,abs64; CALL RAX sequences in the JIT
-//    code.  The .reloc section records every such abs64 fixup so the
-//    Windows loader can rebase them when ASLR places the image at a
-//    different address than 0x400000.
+//  Architecture (fix for audit finding #15 / BUILD-002):
+//  The previous from-scratch PE32+ emitter copied JIT bytes containing
+//  absolute 64-bit addresses of the Omnikarai runtime helpers and of
+//  compile-time string literals — both live only inside the omnicc
+//  process, so the emitted .exe could never run standalone (its helper
+//  calls pointed into a process image that does not exist at runtime).
+//  A correct fix would require a full linker embedding the compiled
+//  runtime; that is out of scope and was NOT faked.
 //
-//  PE sections:
-//    .text   RVA 0x1000  trampoline (26 bytes) + JIT code
-//    .idata  RVA 0x2000  import directory + IAT for KERNEL32.DLL
-//    .reloc  RVA 0x3000  base relocation table (IMAGE_REL_BASED_DIR64)
+//  The working design: a built artifact is a full copy of this omnicc
+//  executable with the program SOURCE appended in a tagged payload.
+//  At startup the copy checks its own image for the payload; if found,
+//  it compiles and runs the embedded source in-process — every helper
+//  address and string literal is resolved naturally by the same codegen
+//  that ran in the original compile. The result is a genuinely standalone
+//  executable (~200 KB) that runs on any machine of the same platform
+//  with no omnicc installed.
 //
-//  Known limitation:
-//    The .reloc patching works correctly for ASLR only when the loader
-//    delta is known.  The runtime helpers embedded via abs64 MOVs
-//    reference addresses inside omnicc.exe itself (the compiler process).
-//    In a truly standalone .exe those helpers must be compiled in or
-//    resolved via IAT thunks.  The current build output is therefore
-//    best used for benchmarking JIT-vs-built performance on the same
-//    machine where omnicc was compiled, with ASLR disabled or matched.
-//    Full standalone build (helpers compiled into the output .exe) is
-//    tracked in KNOWN_ISSUES.md as BUILD-002.
+//  Payload layout appended to the copy (footer at a FIXED offset from the
+//  end of the file so the copy can find it without knowing its own size):
+//    [0..]    ... executable image bytes ...
+//    [N..N+L] source bytes (L = source length)
+//    [N+L..N+L+7]   magic  "OMNISRC1"
+//    [N+L+7..N+L+15] uint64 LE source length
 // ============================================================
+static const char OMNI_PAYLOAD_MAGIC[8] = { 'O','M','N','I','S','R','C','1' };
 
-#define PE_IMAGE_BASE    0x400000ULL
-#define PE_SECT_ALIGN    0x1000
-#define PE_FILE_ALIGN    0x200
+static const char* g_self_exe = NULL;  /* set from argv[0] in main() */
 
-static uint32_t pe_align_up(uint32_t v, uint32_t a) { return (v + a - 1) & ~(a - 1); }
-
-// Little-endian write helpers
-static void pe_u8 (FILE*f, uint8_t  v) { fwrite(&v, 1, 1, f); }
-static void pe_u16(FILE*f, uint16_t v) { fwrite(&v, 2, 1, f); }
-static void pe_u32(FILE*f, uint32_t v) { fwrite(&v, 4, 1, f); }
-static void pe_u64(FILE*f, uint64_t v) { fwrite(&v, 8, 1, f); }
-static void pe_str(FILE*f, const char*s) { fwrite(s, 1, strlen(s)+1, f); }
-static void pe_pad(FILE*f, long target) {
-    long cur = ftell(f);
-    while (cur < target) { pe_u8(f, 0); cur++; }
+/* Locate an appended payload in our own executable image.
+   Returns malloc'd NUL-terminated source, or NULL. */
+static char* omni_read_own_payload(uint64_t* out_len) {
+    const char* self = g_self_exe;
+    if (!self || !*self) return NULL;
+#if defined(__linux__)
+    FILE* f = fopen("/proc/self/exe", "rb");
+    if (!f) f = fopen(self, "rb");
+#else
+    FILE* f = fopen(self, "rb");
+#endif
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long fsz = ftell(f);
+    if (fsz < 16 + (long)sizeof(OMNI_PAYLOAD_MAGIC)) { fclose(f); return NULL; }
+    if (fseek(f, fsz - 16, SEEK_SET) != 0) { fclose(f); return NULL; }
+    char magic[8];
+    uint8_t lenbuf[8];
+    if (fread(magic, 1, 8, f) != 8 || memcmp(magic, OMNI_PAYLOAD_MAGIC, 8) != 0) {
+        fclose(f); return NULL;
+    }
+    if (fread(lenbuf, 1, 8, f) != 8) { fclose(f); return NULL; }
+    uint64_t slen = 0;
+    for (int i = 0; i < 8; i++) slen |= (uint64_t)lenbuf[i] << (8 * i);
+    if (slen == 0 || slen > (uint64_t)fsz) { fclose(f); return NULL; }
+    char* src = (char*)malloc((size_t)slen + 1);
+    if (!src) { fclose(f); return NULL; }
+    if (fseek(f, fsz - 16 - (long)slen, SEEK_SET) != 0 ||
+        fread(src, 1, (size_t)slen, f) != (size_t)slen) {
+        free(src); fclose(f); return NULL;
+    }
+    fclose(f);
+    src[slen] = '\0';
+    if (out_len) *out_len = slen;
+    return src;
 }
-static void pe_patch32(FILE*f, long off, uint32_t v) {
-    long cur = ftell(f);
-    fseek(f, off, SEEK_SET);
-    pe_u32(f, v);
-    fseek(f, cur, SEEK_SET);
+
+/* Compile + run an in-memory source (shared by cmd_run and the embedded
+   payload path). Takes ownership of nothing; mirrors cmd_run's body. */
+static int omni_run_source(const char* path, char* source) {
+    AST_Program* program = compile_source(source, path);
+    if (!program) { free(source); return 1; }
+    CodeGen cg;
+    codegen_set_source(path, source);
+    free(source);
+    codegen_init(&cg);
+    if (!codegen_compile(&cg, program)) {
+        fprintf(stderr, "Compilation failed.\n");
+        codegen_free(&cg);
+        return 1;
+    }
+    OMNI_LOG("[omnicc] running %zu bytes of native x86-64 code...\n", cg.code.size);
+    LARGE_INTEGER t0, t1, freq;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
+    int64_t exit_code = codegen_run(&cg);
+    QueryPerformanceCounter(&t1);
+    double ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
+    OMNI_LOG("[omnicc] done in %.3f ms | exit_code=%lld\n", ms, (long long)exit_code);
+    codegen_free(&cg);
+    return (int)exit_code;
 }
 
-// Entry trampoline — 26 bytes at PE entry point (RVA 0x1000):
-//   48 83 EC 28          sub  rsp, 40       (shadow + align)
-//   E8 xx xx xx xx       call <jit_entry>   (rel32, patched)
-//   48 83 C4 28          add  rsp, 40
-//   31 C9                xor  ecx, ecx
-//   48 A1 xx xx xx xx xx xx xx xx  mov rax, [abs64_IAT_ExitProcess]
-//   FF D0                call rax
-//   CC                   int3
-#define TRAMP_CALL_OFF  5    // byte offset of the rel32 inside call
-#define TRAMP_IAT_OFF  17    // byte offset of the abs64 in mov rax,[m]
-#define TRAMP_SIZE     28    // 4+5+4+2+10+2+1 bytes
-
-static const uint8_t tramp_template[TRAMP_SIZE] = {
-    0x48,0x83,0xEC,0x28,                          // sub  rsp, 40
-    0xE8,0x00,0x00,0x00,0x00,                     // call rel32  (patched)
-    0x48,0x83,0xC4,0x28,                          // add  rsp, 40
-    0x31,0xC9,                                    // xor  ecx, ecx
-    0x48,0xA1,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00, // mov rax,[abs64] (patched)
-    0xFF,0xD0,                                    // call rax
-    0xCC                                          // int3
-};
-
-// KERNEL32 imports — every function the Omnikarai runtime calls
-static const char* const k32[] = {
-    "WriteFile",             // 0
-    "ReadFile",              // 1
-    "GetStdHandle",          // 2
-    "VirtualAlloc",          // 3
-    "VirtualFree",           // 4
-    "ExitProcess",           // 5  <-- trampoline uses slot 5
-    "HeapAlloc",             // 6
-    "HeapFree",              // 7
-    "GetProcessHeap",        // 8
-    "GetSystemTimeAsFileTime",   // 9
-    "QueryPerformanceCounter",   // 10
-    "QueryPerformanceFrequency", // 11
-    "GetFileAttributesA",        // 12
-    "GetFileAttributesExA",      // 13
-    "GetEnvironmentVariableA",   // 14
-    "GetCurrentDirectoryA",      // 15
-    "GetCurrentProcessId",       // 16
-    "CreateDirectoryA",          // 17
-    "DeleteFileA",               // 18
-    "CreateFileA",               // 19
-    "GetFileSizeEx",             // 20
-    "CloseHandle",               // 21
-    "GetTimeZoneInformation",    // 22
-    "SystemTimeToFileTime",      // 23
-    "FileTimeToSystemTime",      // 24
-    "Sleep",                     // 25
-    "GetLastError",              // 26
-    "FlushFileBuffers",          // 27
-    NULL
-};
+/* Returns the embedded program's exit code, or -1 when this executable
+   carries no payload (i.e., it is the plain omnicc tool). */
+static int cmd_run_embedded(void) {
+    char* src = omni_read_own_payload(NULL);
+    if (!src) return -1;
+    return omni_run_source("<embedded>", src);
+}
 
 static int cmd_build(const char* filepath) {
     // ── Output path: swap .ok → .exe ─────────────────────────
@@ -343,265 +345,81 @@ static int cmd_build(const char* filepath) {
     else
         strncat_s(outpath, sizeof(outpath), ".exe", _TRUNCATE);
 
-    // ── Compile source → JIT bytes ────────────────────────────
+    // ── Read + validate the source BEFORE copying (fail early) ──
     char* source = read_file(filepath);
     if (!source) return 1;
     AST_Program* program = compile_source(source, filepath);
     if (!program) { free(source); return 1; }
-    CodeGen cg;
-    codegen_set_source(filepath, source);
-    free(source);
-    codegen_init(&cg);
-    if (!codegen_compile(&cg, program)) {
-        fprintf(stderr, "Compilation failed.\n");
-        codegen_free(&cg);
+    free(source);   /* validated; the payload appends the original file bytes */
+    /* NOTE: compile_source parsed successfully — the program is valid.
+       We append the ORIGINAL file bytes; the built artifact re-parses
+       them at startup. */
+
+    // ── Copy our own executable + append the payload ─────────
+    const char* self = g_self_exe;
+    if (!self || !*self) {
+        fprintf(stderr, "Error: cannot determine own executable path\n");
         return 1;
     }
-    OMNI_LOG("[omnicc build] %zu JIT bytes → %s\n", cg.code.size, outpath);
-
-    // ── Count imports ─────────────────────────────────────────
-    int nfn = 0;
-    while (k32[nfn]) nfn++;
-
-    // ── idata layout (all offsets relative to idata section start) ──
-    //   [0..39]            two 20-byte import descriptors (1 real + null)
-    //   [40..iat_end]      IAT:  (nfn+1) * 8 bytes
-    //   [iat_end..int_end] ILT:  (nfn+1) * 8 bytes  (original thunks)
-    //   [int_end..]        DLL name "KERNEL32.DLL\0"
-    //   [..]               Hint/Name entries
-    uint32_t idata_virt = 0x2000;
-    uint32_t iat_off    = 40;
-    uint32_t ilt_off    = iat_off + (uint32_t)(nfn + 1) * 8;
-    uint32_t dllname_off= ilt_off + (uint32_t)(nfn + 1) * 8;
-    uint32_t hn_off     = dllname_off + 13;  // "KERNEL32.DLL\0" = 13 bytes
-
-    // Compute hint/name RVAs and total idata raw size
-    uint32_t hn_rvas[64] = {0};
-    uint32_t hn_cur = hn_off;
-    for (int i = 0; i < nfn; i++) {
-        hn_rvas[i] = idata_virt + hn_cur;
-        hn_cur += 2 + (uint32_t)strlen(k32[i]) + 1;
-        if (hn_cur & 1) hn_cur++;   // word-align each entry
+#if defined(__linux__)
+    FILE* in = fopen("/proc/self/exe", "rb");
+    if (!in) in = fopen(self, "rb");
+#else
+    FILE* in = fopen(self, "rb");
+#endif
+    if (!in) {
+        fprintf(stderr, "Error: cannot open own executable '%s'\n", self);
+        return 1;
     }
-    uint32_t idata_virt_sz = hn_cur;
-    uint32_t idata_raw_sz  = pe_align_up(idata_virt_sz, PE_FILE_ALIGN);
+    char* file_bytes = read_file(filepath);   /* re-read for the payload */
+    if (!file_bytes) { fclose(in); return 1; }
+    size_t src_len = strlen(file_bytes);
 
-    // ── .text layout ─────────────────────────────────────────
-    uint32_t text_virt      = 0x1000;
-    uint32_t text_code_sz   = TRAMP_SIZE + (uint32_t)cg.code.size;
-    uint32_t text_raw_sz    = pe_align_up(text_code_sz, PE_FILE_ALIGN);
-
-    // ── Scan JIT code for abs64 MOV RAX,imm64 (48 B8) → .reloc ──
-    // RVA of JIT code start inside .text section
-    uint32_t jit_rva_base = text_virt + TRAMP_SIZE;
-    uint32_t reloc_rvas[8192];
-    uint32_t nreloc = 0;
-    uint8_t* jit = cg.code.data;
-    for (uint32_t bi = 0; bi + 10 <= (uint32_t)cg.code.size; bi++) {
-        if (jit[bi] == 0x48 && jit[bi+1] == 0xB8) {
-            // imm64 is at jit[bi+2..bi+9]
-            if (nreloc < 8192)
-                reloc_rvas[nreloc++] = jit_rva_base + bi + 2;
-        }
-    }
-    // Also add the abs64 in the trampoline itself (IAT pointer)
-    // That's at RVA: text_virt + TRAMP_IAT_OFF
-    if (nreloc < 8192)
-        reloc_rvas[nreloc++] = text_virt + TRAMP_IAT_OFF;
-
-    // ── Build .reloc binary ───────────────────────────────────
-    // Sort RVAs (they're already ascending for JIT, just append tramp)
-    // Each block: page RVA (4) + block size (4) + entries (2 each, type 0xA=DIR64)
-    uint8_t  reloc_buf[65536];
-    uint32_t reloc_sz = 0;
-    uint32_t ri = 0;
-    while (ri < nreloc) {
-        uint32_t page = reloc_rvas[ri] & ~(uint32_t)0xFFF;
-        uint32_t bstart = ri;
-        while (ri < nreloc && (reloc_rvas[ri] & ~(uint32_t)0xFFF) == page) ri++;
-        uint32_t cnt = ri - bstart;
-        uint32_t bsz = 8 + cnt * 2;
-        if (bsz & 3) bsz += 2;   // DWORD-align block
-        if (reloc_sz + bsz > sizeof(reloc_buf)) break;
-        memcpy(reloc_buf + reloc_sz, &page, 4); reloc_sz += 4;
-        memcpy(reloc_buf + reloc_sz, &bsz,  4); reloc_sz += 4;
-        for (uint32_t k = bstart; k < ri; k++) {
-            uint16_t e = (uint16_t)(0xA000 | (reloc_rvas[k] & 0xFFF));
-            memcpy(reloc_buf + reloc_sz, &e, 2); reloc_sz += 2;
-        }
-        while (reloc_sz & 3) { memset(reloc_buf + reloc_sz, 0, 2); reloc_sz += 2; }
-    }
-
-    // ── Section virtual/file offsets ─────────────────────────
-    //   headers:  file 0x000..0x1FF  (512 bytes)
-    //   .text:    file 0x200..
-    //   .idata:   file after .text
-    //   .reloc:   file after .idata
-    uint32_t reloc_virt    = idata_virt + pe_align_up(idata_virt_sz, PE_SECT_ALIGN);
-    uint32_t reloc_virt_sz = reloc_sz ? reloc_sz : 4;
-    uint32_t reloc_raw_sz  = pe_align_up(reloc_virt_sz, PE_FILE_ALIGN);
-
-    uint32_t text_foff   = 0x200;
-    uint32_t idata_foff  = text_foff  + text_raw_sz;
-    uint32_t reloc_foff  = idata_foff + idata_raw_sz;
-
-    uint32_t image_sz = reloc_virt + pe_align_up(reloc_virt_sz, PE_SECT_ALIGN);
-
-    // ── Open output file ──────────────────────────────────────
-    FILE* f = NULL;
-    if (fopen_s(&f, outpath, "wb") != 0 || !f) {
+    FILE* out = NULL;
+    if (fopen_s(&out, outpath, "wb") != 0 || !out) {
         fprintf(stderr, "Error: cannot create '%s'\n", outpath);
-        codegen_free(&cg); return 1;
+        free(file_bytes); fclose(in); return 1;
     }
-
-    // ── DOS header + stub ─────────────────────────────────────
-    // MZ header fields
-    pe_u16(f,0x5A4D); pe_u16(f,0x90); pe_u16(f,3);    pe_u16(f,0);
-    pe_u16(f,4);      pe_u16(f,0);    pe_u16(f,0xFFFF);pe_u16(f,0);
-    pe_u16(f,0xB8);   pe_u16(f,0);    pe_u16(f,0);     pe_u16(f,0x40);
-    pe_u16(f,0);
-    for (int i=0;i<10;i++) pe_u16(f,0);  // reserved
-    pe_u32(f, 0x80);   // e_lfanew — PE header at offset 0x80
-    // Minimal DOS stub: prints "not for DOS" then INT 21h/4C
-    static const uint8_t dos_stub[] = {
-        0x0E,0x1F,0xBA,0x0E,0x00,0xB4,0x09,0xCD,0x21,0xB8,0x01,0x4C,0xCD,0x21,
-        'T','h','i','s',' ','p','r','o','g','r','a','m',' ','c','a','n','n','o',
-        't',' ','b','e',' ','r','u','n',' ','i','n',' ','D','O','S',' ','m','o',
-        'd','e','.','\r','\r','\n','$',0,0,0,0,0,0,0,0
-    };
-    fwrite(dos_stub, 1, sizeof(dos_stub), f);
-    pe_pad(f, 0x80);
-
-    // ── PE signature + COFF header ────────────────────────────
-    pe_u32(f, 0x00004550);   // "PE\0\0"
-    pe_u16(f, 0x8664);       // Machine: AMD64
-    pe_u16(f, 3);            // NumberOfSections: .text .idata .reloc
-    pe_u32(f, (uint32_t)time(NULL)); // TimeDateStamp
-    pe_u32(f, 0);            // SymbolTable ptr (none)
-    pe_u32(f, 0);            // NumberOfSymbols
-    pe_u16(f, 0xF0);         // SizeOfOptionalHeader: 240 (PE32+)
-    pe_u16(f, 0x0022);       // Characteristics: IMAGE_FILE_EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
-
-    // ── Optional header (PE32+, 240 bytes) ───────────────────
-    pe_u16(f, 0x020B);          // Magic: PE32+
-    pe_u8(f, 14); pe_u8(f, 0);  // Linker version 14.0
-    pe_u32(f, text_raw_sz);     // SizeOfCode
-    pe_u32(f, idata_raw_sz + reloc_raw_sz); // SizeOfInitializedData
-    pe_u32(f, 0);               // SizeOfUninitializedData
-    pe_u32(f, text_virt);       // AddressOfEntryPoint = .text RVA
-    pe_u32(f, text_virt);       // BaseOfCode
-    pe_u64(f, PE_IMAGE_BASE);   // ImageBase
-    pe_u32(f, PE_SECT_ALIGN);   // SectionAlignment
-    pe_u32(f, PE_FILE_ALIGN);   // FileAlignment
-    pe_u16(f, 6); pe_u16(f, 0); // MajorOperatingSystemVersion
-    pe_u16(f, 0); pe_u16(f, 0); // ImageVersion
-    pe_u16(f, 6); pe_u16(f, 0); // SubsystemVersion (Vista+)
-    pe_u32(f, 0);               // Win32VersionValue (reserved, 0)
-    pe_u32(f, image_sz);        // SizeOfImage
-    pe_u32(f, 0x200);           // SizeOfHeaders
-    pe_u32(f, 0);               // CheckSum
-    pe_u16(f, 3);               // Subsystem: IMAGE_SUBSYSTEM_WINDOWS_CUI (console)
-    pe_u16(f, 0x8160);          // DllCharacteristics: NX_COMPAT|HIGH_ENTROPY_VA|TERMINAL_SERVER_AWARE
-    pe_u64(f, 0x100000);        // SizeOfStackReserve
-    pe_u64(f, 0x1000);          // SizeOfStackCommit
-    pe_u64(f, 0x100000);        // SizeOfHeapReserve
-    pe_u64(f, 0x1000);          // SizeOfHeapCommit
-    pe_u32(f, 0);               // LoaderFlags
-    pe_u32(f, 16);              // NumberOfRvaAndSizes
-    // 16 data directories (8 bytes each)
-    pe_u32(f,0);pe_u32(f,0);                             // [0] Export
-    pe_u32(f,idata_virt);pe_u32(f,idata_virt_sz);        // [1] Import
-    pe_u32(f,0);pe_u32(f,0);                             // [2] Resource
-    pe_u32(f,0);pe_u32(f,0);                             // [3] Exception
-    pe_u32(f,0);pe_u32(f,0);                             // [4] Certificate
-    pe_u32(f,reloc_virt);pe_u32(f,reloc_virt_sz);        // [5] BaseReloc
-    for (int i=6;i<16;i++){pe_u32(f,0);pe_u32(f,0);}    // [6-15]
-
-    // ── Section table (3 * 40 bytes) ─────────────────────────
-    // .text
-    fwrite(".text\0\0\0", 1, 8, f);
-    pe_u32(f, text_code_sz);  pe_u32(f, text_virt);
-    pe_u32(f, text_raw_sz);   pe_u32(f, text_foff);
-    pe_u32(f,0);pe_u32(f,0);pe_u16(f,0);pe_u16(f,0);
-    pe_u32(f, 0x60000020); // CNT_CODE|MEM_EXECUTE|MEM_READ
-    // .idata
-    fwrite(".idata\0\0", 1, 8, f);
-    pe_u32(f, idata_virt_sz); pe_u32(f, idata_virt);
-    pe_u32(f, idata_raw_sz);  pe_u32(f, idata_foff);
-    pe_u32(f,0);pe_u32(f,0);pe_u16(f,0);pe_u16(f,0);
-    pe_u32(f, 0xC0000040); // CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE
-    // .reloc
-    fwrite(".reloc\0\0", 1, 8, f);
-    pe_u32(f, reloc_virt_sz); pe_u32(f, reloc_virt);
-    pe_u32(f, reloc_raw_sz);  pe_u32(f, reloc_foff);
-    pe_u32(f,0);pe_u32(f,0);pe_u16(f,0);pe_u16(f,0);
-    pe_u32(f, 0x42000040); // CNT_INITIALIZED_DATA|MEM_DISCARDABLE|MEM_READ
-
-    pe_pad(f, (long)text_foff);
-
-    // ── .text: trampoline + JIT code ─────────────────────────
-    // Patch trampoline:
-    //   call disp32 = jit_entry_rva - (trampoline_call_end_rva)
-    //   trampoline_call_end_rva = text_virt + TRAMP_CALL_OFF + 4 = text_virt + 9
-    uint32_t jit_entry_rva = text_virt + TRAMP_SIZE;
-    int32_t  call_disp     = (int32_t)(jit_entry_rva - (text_virt + TRAMP_CALL_OFF + 4));
-    //   IAT abs64 for ExitProcess = IMAGE_BASE + idata_virt + iat_off + 5*8
-    uint32_t exit_iat_rva = idata_virt + iat_off + 5 * 8;
-    uint64_t exit_iat_abs = PE_IMAGE_BASE + exit_iat_rva;
-    uint8_t tramp[TRAMP_SIZE];
-    memcpy(tramp, tramp_template, TRAMP_SIZE);
-    memcpy(tramp + TRAMP_CALL_OFF, &call_disp,    4);
-    memcpy(tramp + TRAMP_IAT_OFF,  &exit_iat_abs, 8);
-    fwrite(tramp, 1, TRAMP_SIZE, f);
-    fwrite(cg.code.data, 1, cg.code.size, f);
-    pe_pad(f, (long)(text_foff + text_raw_sz));
-
-    // ── .idata: import descriptors + IAT + ILT + strings ─────
-    long idata_start = ftell(f);
-    uint32_t iat_rva_abs = idata_virt + iat_off;
-    uint32_t ilt_rva_abs = idata_virt + ilt_off;
-    uint32_t dll_rva_abs = idata_virt + dllname_off;
-    // Import descriptor for KERNEL32.DLL
-    pe_u32(f, ilt_rva_abs);   // OriginalFirstThunk (ILT)
-    pe_u32(f, 0);             // TimeDateStamp
-    pe_u32(f, 0);             // ForwarderChain
-    pe_u32(f, dll_rva_abs);   // Name RVA
-    pe_u32(f, iat_rva_abs);   // FirstThunk (IAT — loader fills this)
-    // Null terminator descriptor
-    for (int i=0;i<5;i++) pe_u32(f,0);
-    // IAT (initially hint/name RVAs; loader replaces with real addresses)
-    for (int i=0;i<nfn;i++) pe_u64(f, (uint64_t)hn_rvas[i]);
-    pe_u64(f, 0);
-    // ILT (original thunks — same as initial IAT)
-    for (int i=0;i<nfn;i++) pe_u64(f, (uint64_t)hn_rvas[i]);
-    pe_u64(f, 0);
-    // DLL name
-    fwrite("KERNEL32.DLL", 1, 13, f);  // includes null terminator
-    // Hint/Name entries
-    for (int i=0;i<nfn;i++) {
-        pe_u16(f, (uint16_t)i);      // ordinal hint
-        pe_str(f, k32[i]);           // function name + null
-        if (ftell(f) & 1) pe_u8(f,0); // word-align
+    uint8_t buf[65536];
+    size_t n; uint64_t total = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { fprintf(stderr, "Error: write failed\n"); fclose(in); fclose(out); free(file_bytes); return 1; }
+        total += n;
     }
-    pe_pad(f, (long)(idata_foff + idata_raw_sz));
-    (void)idata_start;
+    fclose(in);
+    uint8_t lenbuf[8];
+    for (int i = 0; i < 8; i++) lenbuf[i] = (uint8_t)((src_len >> (8 * i)) & 0xFF);
+    fwrite(file_bytes, 1, src_len, out);
+    fwrite(OMNI_PAYLOAD_MAGIC, 1, 8, out);
+    fwrite(lenbuf, 1, 8, out);
+    if (fclose(out) != 0) {
+        fprintf(stderr, "Error: flush failed\n");
+        free(file_bytes); return 1;
+    }
+#ifndef _WIN32
+    chmod(outpath, 0755);   /* keep the copy executable */
+#endif
+    free(file_bytes);
 
-    // ── .reloc ────────────────────────────────────────────────
-    fwrite(reloc_buf, 1, reloc_sz, f);
-    pe_pad(f, (long)(reloc_foff + reloc_raw_sz));
-
-    long final_size = ftell(f);
-    fclose(f);
-    codegen_free(&cg);
-
-    fprintf(stderr, "[omnicc build] wrote: %s  (%ld bytes)\n", outpath, final_size);
-    OMNI_LOG("[omnicc build] sections: .text=%u  .idata=%u  .reloc=%u\n",
-             text_raw_sz, idata_raw_sz, reloc_raw_sz);
+    fprintf(stderr, "[omnicc build] wrote: %s  (%llu bytes + %zu source bytes)\n",
+            outpath, (unsigned long long)total, src_len);
+    fprintf(stderr, "[omnicc build] standalone executable — embeds the Omnikarai runtime\n");
     return 0;
 }
 
+
 // ── Entry point ──────────────────────────────────────────────
 int main(int argc, char** argv) {
+    g_self_exe = argc > 0 ? argv[0] : NULL;
+
+    /* Standalone payload check: a program built by `omnicc build` is a copy
+       of this executable with the source appended. If the payload is present
+       we are the built program — compile and run it, ignoring CLI args. */
+    {
+        int rc = cmd_run_embedded();
+        if (rc >= 0) return rc;
+    }
+
     if (argc < 2) { print_usage(); return 1; }
     const char* cmd = argv[1];
 

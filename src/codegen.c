@@ -1971,109 +1971,12 @@ static void emit_call_extern(CodeBuf*b,void*fn){emit_u8(b,REX_W);emit_u8(b,0xB8)
 // ============================================================
 //  CONSTANT MODULO (Barrett reduction)
 // ============================================================
-typedef struct{uint64_t magic;int post_shift;}MagicDiv;
-static int get_magic_div(int64_t d,MagicDiv*out){
-    // Correct 64-bit unsigned Barrett magic: floor(n/d) = mulhi64(n, magic) >> shift
-    // All shift=0: floor(n/d) = upper 64 bits of (n * magic)
-    // Computed as ceil(2^64 / d) — verified correct for 0..d*1000
-    struct{int64_t d;uint64_t magic;int shift;}table[]={
-        {   2,0x8000000000000000ULL,0},
-        {   3,0x5555555555555556ULL,0},
-        {   4,0x4000000000000000ULL,0},
-        {   5,0x3333333333333334ULL,0},
-        {   6,0x2AAAAAAAAAAAAAABULL,0},
-        {   7,0x2492492492492493ULL,0},
-        {   8,0x2000000000000000ULL,0},
-        {   9,0x1C71C71C71C71C72ULL,0},
-        {  10,0x199999999999999AULL,0},
-        {  11,0x1745D1745D1745D2ULL,0},
-        {  12,0x1555555555555556ULL,0},
-        {  13,0x13B13B13B13B13B2ULL,0},
-        {  14,0x124924924924924AULL,0},
-        {  15,0x1111111111111112ULL,0},
-        {  16,0x1000000000000000ULL,0},
-        {  17,0x0F0F0F0F0F0F0F10ULL,0},
-        {  18,0x0E38E38E38E38E39ULL,0},
-        {  19,0x0D79435E50D79436ULL,0},
-        {  20,0x0CCCCCCCCCCCCCCDULL,0},
-        {  21,0x0C30C30C30C30C31ULL,0},
-        {  22,0x0BA2E8BA2E8BA2E9ULL,0},
-        {  23,0x0B21642C8590B217ULL,0},
-        {  24,0x0AAAAAAAAAAAAAABULL,0},
-        {  25,0x0A3D70A3D70A3D71ULL,0},
-        {  26,0x09D89D89D89D89D9ULL,0},
-        {  27,0x097B425ED097B426ULL,0},
-        {  28,0x0924924924924925ULL,0},
-        {  29,0x08D3DCB08D3DCB09ULL,0},
-        {  30,0x0888888888888889ULL,0},
-        {  31,0x0842108421084211ULL,0},
-        {  32,0x0800000000000000ULL,0},
-        {  33,0x07C1F07C1F07C1F1ULL,0},
-        {  37,0x06EB3E45306EB3E5ULL,0},
-        {  41,0x063E7063E7063E71ULL,0},
-        {  43,0x05F417D05F417D06ULL,0},
-        {  47,0x0572620AE4C415CAULL,0},
-        {  53,0x04D4873ECADE304EULL,0},
-        {  59,0x0456C797DD49C342ULL,0},
-        {  61,0x04325C53EF368EB1ULL,0},
-        {  67,0x03D226357E16ECE6ULL,0},
-        {  71,0x039B0AD12073615BULL,0},
-        {  73,0x0381C0E070381C0FULL,0},
-        {  79,0x033D91D2A2067B24ULL,0},
-        {  83,0x03159721ED7E7535ULL,0},
-        {  89,0x02E05C0B81702E06ULL,0},
-        {  97,0x02A3A0FD5C5F02A4ULL,0},
-        { 100,0x028F5C28F5C28F5DULL,0},
-        { 128,0x0200000000000000ULL,0},
-        {1000,0x004189374BC6A7F0ULL,0},
-    };
-    for(int i=0;i<(int)(sizeof(table)/sizeof(table[0]));i++)
-        if(table[i].d==d){out->magic=table[i].magic;out->post_shift=table[i].shift;return 1;}
-    return 0;
-}
 // Returns k if n == 2^k, else -1
 static int log2_exact(int64_t n){
     if(n<=0)return -1;
     int k=0; int64_t v=1;
     while(v<n){v<<=1;k++;if(k>62)return -1;}
     return (v==n)?k:-1;
-}
-static void emit_mod_const(CodeBuf*b,int64_t divisor){
-    // Fast path 1: power-of-2 → AND RAX, (divisor-1)  [1 cycle]
-    int k=log2_exact(divisor);
-    if(k>=1){
-        int64_t mask=divisor-1;
-        if(mask<=127){emit_u8(b,REX_W);emit_u8(b,0x83);emit_u8(b,0xE0);emit_u8(b,(uint8_t)mask);}
-        else{emit_u8(b,REX_W);emit_u8(b,0x25);emit_u32(b,(uint32_t)mask);}
-        return;
-    }
-    // Fast path 2: Barrett reduction — ~5 cycles vs ~40 for IDIV
-    // Sequence: MOV R11,RAX; MOV RCX,magic; MUL RCX; SHR RDX,shift; IMUL RCX,RDX,d; SUB RAX,RCX
-    // (uses R11 as scratch to save original dividend before MUL clobbers RAX)
-    MagicDiv md;
-    if(divisor>1&&get_magic_div(divisor,&md)){
-        // Save dividend: MOV R11, RAX  (49 89 C3)
-        emit_u8(b,0x49);emit_u8(b,0x89);emit_u8(b,0xC3);
-        // MOV RCX, magic64
-        emit_u8(b,REX_W);emit_u8(b,0xB9);emit_u64(b,md.magic);
-        // MUL RCX → RDX:RAX = RAX * magic (unsigned)
-        emit_u8(b,REX_W);emit_u8(b,0xF7);emit_u8(b,0xE1);
-        // SHR RDX, shift  (quotient approximation in RDX)
-        if(md.post_shift>0){emit_u8(b,REX_W);emit_u8(b,0xC1);emit_u8(b,0xEA);emit_u8(b,(uint8_t)md.post_shift);}
-        // IMUL RCX, RDX, divisor  → RCX = quotient * divisor
-        if(divisor>=-128&&divisor<=127){emit_u8(b,REX_W);emit_u8(b,0x6B);emit_u8(b,0xCA);emit_u8(b,(uint8_t)(int8_t)divisor);}
-        else{emit_u8(b,REX_W);emit_u8(b,0x69);emit_u8(b,0xCA);emit_u32(b,(uint32_t)divisor);}
-        // Restore original dividend: MOV RAX, R11  (49 8B C3)  REX.WB + 8B + ModRM(mod=11,reg=RAX=0,r/m=R11=3+B)
-        emit_u8(b,0x49);emit_u8(b,0x8B);emit_u8(b,0xC3);
-        // SUB RAX, RCX  → remainder
-        emit_u8(b,REX_W);emit_u8(b,0x29);emit_u8(b,0xC8);
-        return;
-    }
-    // Fallback: CQO + IDIV — ~40 cycles
-    emit_u8(b,REX_W);emit_u8(b,0xB9);emit_u64(b,(uint64_t)divisor); // MOV RCX, divisor
-    emit_u8(b,REX_W);emit_u8(b,0x99);                                  // CQO
-    emit_u8(b,REX_W);emit_u8(b,0xF7);emit_u8(b,0xF9);                 // IDIV RCX
-    emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xD0);                 // MOV RAX, RDX
 }
 
 // ============================================================
@@ -2449,20 +2352,19 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
         else    {emit_imul_rax_imm32(&cg->code,(int32_t)rhs_const);}
         return;
     }
-    // Const-RHS mod: use Barrett reduction or power-of-2 AND
-    if(rhs_is_const && strcmp(op,"%")==0 && rhs_const>1){
-        cg_expr(cg,node->left); emit_mod_const(&cg->code,rhs_const); return;
-    }
-    // Const-RHS division: power-of-2 → SAR; else CQO+IDIV
-    if(rhs_is_const && strcmp(op,"/")==0 && rhs_const>1){
-        int k=log2_exact(rhs_const);
+    /* FIX(N1): const-RHS div/mod fast paths removed. The previous SAR
+       (power-of-2 divide), AND (power-of-2 modulo) and unsigned-MUL Barrett
+       paths are all silently WRONG for negative operands:
+         -7 / 4 : SAR gives -2 (floors toward -inf); the language's division
+                  truncates toward 0 like IDIV → -1
+         -7 % 4 : AND gives  1; truncating remainder is -3
+       The Barrett path uses unsigned MUL, meaningless for signed values.
+       Correctness beats the ~40-cycle IDIV: use CQO+IDIV unconditionally. */
+    if(rhs_is_const && rhs_const>1 && (strcmp(op,"%")==0 || strcmp(op,"/")==0)){
         cg_expr(cg,node->left);
-        if(k>=1){
-            if(k==1){emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0xD1);emit_u8(&cg->code,0xF8);}
-            else{emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0xC1);emit_u8(&cg->code,0xF8);emit_u8(&cg->code,(uint8_t)k);}
-        } else {
-            emit_mov_rcx_imm64(&cg->code,rhs_const); emit_idiv_rcx(&cg->code);
-        }
+        emit_mov_rcx_imm64(&cg->code,rhs_const);
+        if(strcmp(op,"/")==0) emit_idiv_rcx(&cg->code);
+        else                  emit_mod_rax_rcx(&cg->code);
         return;
     }
     // Const-RHS add/sub: use ADD/SUB rax, imm8/imm32 (shorter, no tmp slot)
