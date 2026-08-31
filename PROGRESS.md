@@ -1,127 +1,63 @@
-# Omnikarai v7.0 — MKL Beater Progress Log
-**Date:** 2026-03-31
-**Goal:** Make compiler more powerful/effective than Intel MKL for math
+# Omnikarai Stabilization Progress — v7.1.0
 
----
+This file records what changed between the last pre-stabilization commit
+(`877e18f "Bugfix -23"`, 2026-05-25) and the v7.1.0 release candidate.
+The engineering-level audit log with per-finding evidence is
+`docs_internal/FINDINGS.md`.
 
-## COMPLETED
+## Security & trust
 
-### 1. Makefile — AVX2/FMA Enabled
-- Changed `CFLAGS` from `-O2` to `-O3 -march=native -mavx2 -mfma -ffast-math -DNDEBUG`
-- `Makefile` line 2: now enables AVX2+FMA code paths in runtime kernels
-- Without this flag, all `#if defined(__AVX2__)` blocks were dead code
+- MIT LICENSE added; third-party notices documented (previously unlicensed).
+- Package registry auth fails secure: hardcoded `opi-dev-secret` JWT
+  fallback removed everywhere; deployments without `JWT_SECRET` refuse to
+  authenticate.
+- All 20 committed `.exe` binaries, stale scratch outputs, and the personal
+  `journal.txt` removed from the repository (~7k dead LOC deleted with them:
+  `codegen_backup.c`, `codegen_test.c`).
 
-### 2. Register Allocator — Aggressive Pinning
-**File:** `src/codegen.c`
+## Cross-platform port
 
-**Function-level regalloc (line ~3460):**
-- Removed `ra_has_calls` check — callee-saved registers (rbx/r12/r13/rsi/rdi) are preserved across calls by Windows x64 ABI, so pinning is safe even with function calls
-- Lowered threshold from `count<2` to `count<1` — pin ALL hot variables, not just frequently-read ones
-- Kept max 5 slots (rbx/r12/r13/rsi/rdi)
+- Full POSIX backend in `include/omni_platform.h` (file ops, directory
+  iteration, memory status, exec memory via mmap/mprotect, path shims).
+- Generated code targets Win64 **and** SysV ABIs (`include/abi.h`):
+  argument registers, shadow space, pinned-register sets, XMM float args.
+- Linux is the primary CI platform; Windows x64 (MinGW) CI keeps the
+  Win64 path exercised.
 
-**While-loop pinning (line ~2984):**
-- Increased from 3 slots to 5 slots (rbx/r12/r13/rsi/rdi)
-- Lowered threshold from 2 to 1
-- Updated `already pinned` check from `k<5` to `k<7`
-- Added RSI/RDI (slots 5-6) to load/store switch statements
+## Compiler correctness (audit findings → fixes)
 
-**For-loop body pinning (line ~3150):**
-- Increased from 3 to 5 slots (`fbody_nsaved<5`)
-- Updated `already` check from `k<5` to `k<7`
-- Updated slot limit from `fslot>4` to `fslot>6`
-- Added RSI/RDI cases to register load switch
+- print/sysV arg0 bug (every print returned garbage on SysV).
+- `sqrt(144.0)` class of bugs: float literals corrupted by unconditional
+  CVTSI2SD; math entry now converts per static type.
+- `-7 / 4` class of bugs: SAR/AND/Barrett fast paths replaced by
+  CQO+IDIV (truncation semantics, verified on negatives).
+- Inlined `return` inside `if` no longer emits a physical `ret` into the
+  caller's stream (stress03 now passes).
+- For-loop register pinning no longer corrupts callee-saved registers
+  (the JIT host crashed with SIGSEGV on Linux).
+- `ai.free` returns a defined status; `sys.version` reports the real
+  platform; the ghost `numrai` module is gone from banner, tables, docs.
 
-### 3. Matrix-Matrix Multiply Kernel — AVX2 FMA + Cache Tiling
-**File:** `src/codegen.c` (inserted after `omni_ai_matmul`, ~line 824)
+## AI module
 
-**New runtime functions:**
-- `omni_ai_matmul_nn(C, A, B, M, K, N)` — full matrix-matrix multiply
-  - 4×8 micro-kernel: 4 rows × 8 AVX2 lanes = 32 FP32 ops per K iteration
-  - K-loop unrolled ×4 for ILP
-  - Cache tiling: MC=64, NC=64, KC=256 for L1/L2 efficiency
-  - Scalar fallback for non-AVX2 builds
-- `omni_matmul_nn_call()` — int64 ABI wrapper
-- `omni_ai_gemm(C, A, B, M, K, N, alpha, beta)` — general matrix multiply C = αAB + βC
-- `omni_gemm_call()` — int64 ABI wrapper
-- Helper: `micro_kernel_4x8()` — inline 4×8 AVX2 FMA block
-- Helper: `dot_row_col()` — scalar remainder dot product
+- INT8 API added: `ai.set_i8 / set_u8 / get_i8 / get_u8` — the only
+  correct way to populate buffers consumed by `ai.dot_i8`.
 
-**Function pointers added (line ~1197):**
-- `g_fn_matmul_nn = omni_matmul_nn_call`
-- `g_fn_gemm = omni_gemm_call`
+## Toolchain
 
-**Codegen dispatch added (ai module, ~line 2580):**
-- `ai.matmul_nn(C, A, B, M, K, N)` — 6 args, registers RCX/RDX/R8/R9 + stack [rsp+32],[rsp+40]
-- `ai.gemm(C, A, B, M, K, N, alpha, beta)` — 8 args, registers + stack for args 5-8
+- Standalone builds redesigned: `omnicc build` emits a self-copy with the
+  program source embedded; the artifact recompiles in-process at startup
+  and genuinely runs without omnicc installed. The previous from-scratch
+  PE emitter could never resolve its runtime references and was removed.
+- Portable test runner `tests/run_tests.py` (Python) replaces the
+  PowerShell-only runners; 21 unit + 9 stress tests, all passing.
+- CI: linux.yml (gcc / ASan+UBSan / portable), windows.yml (MinGW).
+- Reproducible benchmark runner `benchmarks/run_benchmarks.py`.
+- ASan+UBSan clean on the full suite; gcc `-fanalyzer` reports 0 CWE
+  findings; an OOB read in the `strncpy_s` shim (masked by the MSVC CRT on
+  Windows) was caught and fixed by the sanitizer build.
 
-### 4. Math Module Expansion
-**New runtime functions added (after `omni_math_clamp`):**
-- `omni_math_exp(v)` — e^v
-- `omni_math_exp2(v)` — 2^v
-- `omni_math_tanh(v)` — hyperbolic tangent
-- `omni_math_asin(v)` — arcsine
-- `omni_math_acos(v)` — arccosine
-- `omni_math_atan(v)` — arctangent
-- `omni_math_atan2(y,x)` — two-argument arctangent
-- `omni_math_sinh(v)` — hyperbolic sine
-- `omni_math_cosh(v)` — hyperbolic cosine
-- `omni_math_cbrt(v)` — cube root
-- `omni_math_hypot(a,b)` — hypotenuse
-- `omni_math_sign(v)` — sign (-1, 0, 1)
-- `omni_math_isnan(v)` — NaN check
-- `omni_math_isinf(v)` — infinity check
+## Versions
 
----
-
-## REMAINING (TODO)
-
-### 5. Wire Math Functions into Codegen
-- Add `g_fn_math_exp`, `g_fn_math_tanh`, etc. function pointers (after `g_fn_math_clamp` at line ~653)
-- Add dispatch cases in `cg_module_call` math section (~line 2300): `math.exp()`, `math.tanh()`, `math.atan2()`, etc.
-- Add `math.atan2` two-arg handler (similar to `math.pow` pattern)
-- Update `infer_type()` to return `OMNI_TYPE_FLOAT` for new math functions
-
-### 6. Vectorized Activation Functions (ai module)
-Add to runtime (after `omni_ai_layernorm`):
-- `omni_ai_exp_f32(arr, n)` — element-wise exp using AVX2 approx
-- `omni_ai_tanh_f32(arr, n)` — element-wise tanh
-- `omni_ai_sigmoid_f32(arr, n)` — element-wise sigmoid
-- Wire into `ai` codegen dispatch as `ai.exp(arr,n)`, `ai.tanh(arr,n)`, `ai.sigmoid(arr,n)`
-
-### 7. Improve Dotprod Kernel
-- Current: 4-way unroll with 4 accumulators
-- Upgrade to 8-way unroll with 8 accumulators for better throughput
-
-### 8. BatchNorm and Softmax Fast
-- `omni_ai_batchnorm(x, mean, var, gamma, beta, n, eps)` — fused AVX2 batch normalization
-- `omni_ai_softmax_fast(arr, n)` — improved softmax with AVX2 exp approximation
-
-### 9. Build and Test
-- Run `make clean && make` to compile
-- Run existing tests: `powershell -File tests/run_tests.ps1`
-- Run benchmarks: `powershell -File benchmarks/run_benchmarks.ps1`
-- Verify correctness of new matmul_nn and gemm with a test file
-
----
-
-## KEY FILES
-- `src/codegen.c` — main codegen (3800+ lines, all changes here)
-- `include/codegen.h` — CodeGen struct definition
-- `include/ast.h` — AST node types
-- `src/parser.c` — Pratt parser
-- `src/lexer.c` — lexer with indent/dedent
-- `src/main.c` — CLI entry point
-- `Makefile` — build config
-- `Bench_results.txt` — historical benchmark results
-
-## BUILD COMMAND
-```
-cd C:\Users\akikf\programing\omnikarai\omniwin
-make clean && make
-```
-
-## TEST COMMAND
-```
-bin\omnicc.exe run tests\t16_ai_alloc.ok
-bin\omnicc.exe run benchmarks\bench_matmul.ok
-```
+- `v6.02.24` → **v7.1.0** everywhere (banner, `sys.version`, `sys.omni_ver`,
+  tests, docs).
