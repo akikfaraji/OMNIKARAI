@@ -1,6 +1,6 @@
 # TEST 18 — ai.dot: FP32 dot product via AVX2 VFMADD231PS
 # a = [1.0, 2.0, 3.0, 4.0], b = [1.0, 2.0, 3.0, 4.0]
-# dot = 1+4+9+16 = 30.0 → bits = 0x41F00000 = 1106771968
+# dot = 1+4+9+16 = 30.0 → bits = 0x41F00000 = 1106247680
 
 use ai
 
@@ -19,7 +19,7 @@ ai.set(b, 3, 1082130432)
 
 set result = ai.dot(a, b, 4)
 
-# result should be 1106771968 (30.0f as int32 bits)
+# result should be 1106247680 (30.0f = 0x41F00000 as int32 bits)
 print(result)
 
 ai.free(a)

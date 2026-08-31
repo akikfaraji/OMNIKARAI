@@ -89,6 +89,7 @@ typedef struct {
     // v4.0: leaf inlining
     int    is_inline;    // 1 = single-expression body, inlined at call sites
     void*  inline_ast;   // pointer to AST_Statement_FnDef (for inline emit)
+    OmniType ret_type;   // statically inferred return type (INT if unknown)
 } FnEntry;
 
 // --- Call patch (for resolving CALL rel32 after all fns are emitted) ---

@@ -1,31 +1,32 @@
 # TEST 20 — ai.dot_i8: INT8 quantized dot product via VPMADDUBSW
-# a = [1,2,3,4,5,6,7,8,...] as uint8 packed into int64 slots (1 byte per slot)
-# b = [1,1,1,1,1,1,1,1,...] as int8
+# a = [1,2,3,4,5,6,7,8] as uint8, b = [1,1,1,1,1,1,1,1] as int8
 # dot = 1+2+3+4+5+6+7+8 = 36
+#
+# Uses ai.set_u8 / ai.set_i8: ai.set stores FP32 and CANNOT populate an
+# INT8 buffer (finding #16) — ai.set(arr,0,1) writes bytes 00 00 80 3F.
 
 use ai
 
 set a = ai.alloc(8)
 set b = ai.alloc(8)
 
-# Store uint8 values as int64 (low byte only used)
-ai.set(a, 0, 1)
-ai.set(a, 1, 2)
-ai.set(a, 2, 3)
-ai.set(a, 3, 4)
-ai.set(a, 4, 5)
-ai.set(a, 5, 6)
-ai.set(a, 6, 7)
-ai.set(a, 7, 8)
+ai.set_u8(a, 0, 1)
+ai.set_u8(a, 1, 2)
+ai.set_u8(a, 2, 3)
+ai.set_u8(a, 3, 4)
+ai.set_u8(a, 4, 5)
+ai.set_u8(a, 5, 6)
+ai.set_u8(a, 6, 7)
+ai.set_u8(a, 7, 8)
 
-ai.set(b, 0, 1)
-ai.set(b, 1, 1)
-ai.set(b, 2, 1)
-ai.set(b, 3, 1)
-ai.set(b, 4, 1)
-ai.set(b, 5, 1)
-ai.set(b, 6, 1)
-ai.set(b, 7, 1)
+ai.set_i8(b, 0, 1)
+ai.set_i8(b, 1, 1)
+ai.set_i8(b, 2, 1)
+ai.set_i8(b, 3, 1)
+ai.set_i8(b, 4, 1)
+ai.set_i8(b, 5, 1)
+ai.set_i8(b, 6, 1)
+ai.set_i8(b, 7, 1)
 
 set result = ai.dot_i8(a, b, 8)
 print(result)

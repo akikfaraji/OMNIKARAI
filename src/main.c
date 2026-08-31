@@ -109,6 +109,47 @@ static AST_Program* compile_source(const char* source, const char* filename) {
 }
 
 // ── omnicc run ───────────────────────────────────────────────
+/* TEMP DIAGNOSTIC: SIGSEGV handler that reports the faulting PC and address
+   so JIT faults can be mapped back to a JIT buffer offset. Enabled when
+   OMNI_JIT_DEBUG=1. Remove once the SysV port is proven stable. */
+#ifndef _WIN32
+#define _GNU_SOURCE /* for REG_RIP in ucontext */
+#include <signal.h>
+static volatile void* g_jit_mem = NULL;
+static volatile size_t g_jit_size = 0;
+static void omni_jit_sigaction(int sig, siginfo_t* si, void* uctx) {
+    ucontext_t* uc = (ucontext_t*)uctx;
+    uintptr_t pc = (uintptr_t)uc->uc_mcontext.gregs[16]; /* 16 == REG_RIP on x86-64 glibc */
+    fprintf(stderr, "\n[SIGSEGV] sig=%d fault_addr=%p pc=%p", sig, si->si_addr, (void*)pc);
+    if (g_jit_mem && (uintptr_t)pc >= (uintptr_t)g_jit_mem &&
+        (uintptr_t)pc <  (uintptr_t)g_jit_mem + g_jit_size) {
+        fprintf(stderr, " → JIT offset 0x%zx\n", (size_t)(pc - (uintptr_t)g_jit_mem));
+    } else {
+        /* Resolve pc against the main executable's load base via /proc/self/maps */
+        FILE* mf = fopen("/proc/self/maps", "r");
+        uintptr_t base = 0; char line[512];
+        if (mf) {
+            while (fgets(line, sizeof(line), mf)) {
+                if (strstr(line, "omnicc")) {
+                    base = (uintptr_t)strtoul(line, NULL, 16);
+                    break;
+                }
+            }
+            fclose(mf);
+        }
+        if (base && pc >= base)
+            fprintf(stderr, " → host offset 0x%zx (use addr2line)\n", (size_t)(pc - base));
+        else
+            fprintf(stderr, " (unknown region)\n");
+    }
+    _exit(139);
+}
+
+void omni_host_set_jit_region(void* mem, size_t sz) {
+    g_jit_mem = mem; g_jit_size = sz;
+}
+#endif /* !_WIN32 */
+
 static int cmd_run(const char* filepath) {
     char* source = read_file(filepath);
     if (!source) return 1;
@@ -122,6 +163,16 @@ static int cmd_run(const char* filepath) {
         fprintf(stderr, "Compilation failed.\n");
         codegen_free(&cg);
         return 1;
+    }
+    if (getenv("OMNI_JIT_DEBUG")) {
+        struct sigaction sa; memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = omni_jit_sigaction;
+        sa.sa_flags = SA_SIGINFO;
+        sigaction(SIGSEGV, &sa, NULL);
+        sigaction(SIGILL,  &sa, NULL);
+        sigaction(SIGBUS,  &sa, NULL);
+        extern void codegen_set_jit_region(void* mem, size_t sz);
+        /* region pointer is set inside codegen_run via the weak hook below */
     }
     OMNI_LOG("[omnicc] running %zu bytes of native x86-64 code...\n", cg.code.size);
     LARGE_INTEGER t0, t1, freq;

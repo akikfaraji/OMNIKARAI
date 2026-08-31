@@ -549,7 +549,13 @@ __attribute__((noinline)) int64_t omni_io_size(const char* path) {
 // ============================================================
 //  SYS MODULE
 // ============================================================
-__attribute__((noinline)) const char* omni_sys_version(void)   { return "Omnikarai v6.02.24 (x86-64 Windows)"; }
+__attribute__((noinline)) const char* omni_sys_version(void) {
+#if defined(_WIN32)
+    return "Omnikarai v6.02.24 (x86-64 Windows)";
+#else
+    return "Omnikarai v6.02.24 (x86-64 Linux)";
+#endif
+}
 __attribute__((noinline)) const char* omni_sys_platform(void) {
 #if defined(_WIN32)
     return "windows-x64";
@@ -1181,8 +1187,11 @@ __attribute__((noinline)) int64_t omni_ai_alloc(int64_t floats) {
     memset(p, 0, (size_t)floats * sizeof(float));
     return (int64_t)(uintptr_t)p;
 }
-__attribute__((noinline)) void omni_ai_free(int64_t ptr) {
+__attribute__((noinline)) int64_t omni_ai_free(int64_t ptr) {
+    /* FIX(N7): was void — callers consume the return value (set gone = ai.free(arr)),
+       which read whatever garbage RAX held. Return a defined status. */
     _aligned_free((void*)(uintptr_t)ptr);
+    return 0;
 }
 __attribute__((noinline)) void omni_ai_set(int64_t arr, int64_t idx, int64_t val) {
     float fv; memcpy(&fv, &val, sizeof(float));
@@ -1191,6 +1200,25 @@ __attribute__((noinline)) void omni_ai_set(int64_t arr, int64_t idx, int64_t val
 __attribute__((noinline)) int64_t omni_ai_get(int64_t arr, int64_t idx) {
     float v = ((float*)(uintptr_t)arr)[idx];
     int64_t bits = 0; memcpy(&bits, &v, sizeof(float)); return bits;
+}
+
+/* --- INT8/UINT8 element accessors (FIX for finding #16) ---
+   ai.set writes FP32, but dot_i8 reads raw int8/uint8 bytes. Without
+   byte-width setters there is NO correct way to populate an INT8 buffer
+   from the language: ai.set(arr,0,1) writes the FP32 bit pattern of 1.0
+   (00 00 80 3F), which dot_i8 then reads as bytes 0,0,-128,63.
+   These accessors make the quantized path actually usable. */
+__attribute__((noinline)) int64_t omni_ai_set_i8(int64_t arr, int64_t idx, int64_t val) {
+    ((int8_t*)(uintptr_t)arr)[idx] = (int8_t)val; return 0;
+}
+__attribute__((noinline)) int64_t omni_ai_set_u8(int64_t arr, int64_t idx, int64_t val) {
+    ((uint8_t*)(uintptr_t)arr)[idx] = (uint8_t)val; return 0;
+}
+__attribute__((noinline)) int64_t omni_ai_get_i8(int64_t arr, int64_t idx) {
+    return (int64_t)((int8_t*)(uintptr_t)arr)[idx];
+}
+__attribute__((noinline)) int64_t omni_ai_get_u8(int64_t arr, int64_t idx) {
+    return (int64_t)((uint8_t*)(uintptr_t)arr)[idx];
 }
 __attribute__((noinline)) void omni_ai_fill(int64_t arr, int64_t val, int64_t n) {
     float fv; memcpy(&fv, &val, sizeof(float));
@@ -1602,6 +1630,10 @@ static void* volatile g_fn_ai_alloc      = (void*)omni_ai_alloc;
 static void* volatile g_fn_ai_free       = (void*)omni_ai_free;
 static void* volatile g_fn_ai_set        = (void*)omni_ai_set;
 static void* volatile g_fn_ai_get        = (void*)omni_ai_get;
+static void* volatile g_fn_ai_set_i8     = (void*)omni_ai_set_i8;
+static void* volatile g_fn_ai_set_u8     = (void*)omni_ai_set_u8;
+static void* volatile g_fn_ai_get_i8     = (void*)omni_ai_get_i8;
+static void* volatile g_fn_ai_get_u8     = (void*)omni_ai_get_u8;
 static void* volatile g_fn_ai_fill       = (void*)omni_ai_fill;
 static void* volatile g_fn_ai_matmul     = (void*)omni_ai_matmul;
 static void* volatile g_fn_ai_dot_i8     = (void*)omni_ai_dot_i8;
@@ -1647,6 +1679,86 @@ static Symbol* scope_define(SymbolTable* st,const char* name,OmniType type){Symb
 //  FUNCTION REGISTRY
 // ============================================================
 static FnEntry* fn_find(CodeGen* cg,const char* name){for(int i=0;i<cg->fn_count;i++)if(strcmp(cg->fn_table[i].name,name)==0)return &cg->fn_table[i];return NULL;}
+
+/* Statically infer a user fn's return type from its return expressions.
+   The language has no declared return types; print(x)/str-concat and other
+   consumers need this to pick the right printer (a fn returning a string
+   must not be printed as an integer — that leaks the char* address). */
+static OmniType fn_infer_ret_expr(AST_Expression*e,AST_Statement_FnDef*fd,int depth);
+/* Resolve an identifier's type by scanning the fn body's own `set` statements
+   (PASS 1 runs before any scope exists, so symbol lookup can't help yet). */
+static OmniType fn_infer_ident_in_fn(AST_Statement_FnDef*fd,const char*name,int depth){
+    if(!fd||!fd->body||depth>4) return OMNI_TYPE_INT;
+    for(int i=0;i<fd->body->statement_count;i++){
+        AST_Statement*s=fd->body->statements[i];
+        if(s&&s->type==SET_STATEMENT){
+            AST_Statement_Set*ss=(AST_Statement_Set*)s;
+            if(ss->name&&ss->name->value&&strcmp(ss->name->value,name)==0)
+                return fn_infer_ret_expr(ss->value,fd,depth+1);
+        }
+    }
+    return OMNI_TYPE_INT;
+}
+/* Members across all built-in modules whose calls return STR — shared by
+   infer_type() and the fn return-type inference so both stay in sync. */
+static int member_returns_str(const char* m){
+    return m && (strcmp(m,"format")==0||strcmp(m,"format_date")==0||
+           strcmp(m,"format_time")==0||strcmp(m,"weekday_name")==0||
+           strcmp(m,"month_name")==0||strcmp(m,"cwd")==0||
+           strcmp(m,"platform")==0||strcmp(m,"arch")==0||
+           strcmp(m,"version")==0||strcmp(m,"omni_ver")==0||
+           strcmp(m,"read")==0||strcmp(m,"getenv")==0||
+           strcmp(m,"concat")==0||strcmp(m,"slice")==0||
+           strcmp(m,"fromint")==0||strcmp(m,"fromfloat")==0||
+           strcmp(m,"upper")==0||strcmp(m,"lower")==0||
+           strcmp(m,"trim")==0||strcmp(m,"lstrip")==0||
+           strcmp(m,"rstrip")==0||strcmp(m,"strip")==0||
+           strcmp(m,"reverse")==0||strcmp(m,"replace")==0||
+           strcmp(m,"repeat")==0||strcmp(m,"pad_left")==0||
+           strcmp(m,"pad_right")==0||strcmp(m,"to_upper_first")==0||
+           strcmp(m,"to_lower_first")==0||strcmp(m,"input")==0);
+}
+static OmniType fn_infer_ret_expr(AST_Expression*e,AST_Statement_FnDef*fd,int depth){
+    if(!e) return OMNI_TYPE_INT;
+    if(depth>6) return OMNI_TYPE_INT;
+    switch(e->type){
+        case STRING_LITERAL: return OMNI_TYPE_STR;
+        case FLOAT_LITERAL:  return OMNI_TYPE_FLOAT;
+        case BOOLEAN_LITERAL:return OMNI_TYPE_BOOL;
+        case IDENTIFIER:
+            return fd ? fn_infer_ident_in_fn(fd,((AST_Expression_Identifier*)e)->value,depth)
+                      : OMNI_TYPE_INT;
+        case CALL_EXPRESSION:{
+            AST_Expression_Call*cc=(AST_Expression_Call*)e;
+            if(cc->function&&cc->function->type==MEMBER_ACCESS_EXPRESSION){
+                AST_Expression_MemberAccess*ma=(AST_Expression_MemberAccess*)cc->function;
+                if(member_returns_str(ma->member)) return OMNI_TYPE_STR;
+            }
+            return OMNI_TYPE_INT;
+        }
+        case INFIX_EXPRESSION:{
+            AST_Expression_Infix*in=(AST_Expression_Infix*)e;
+            OmniType lt=fn_infer_ret_expr(in->left,fd,depth+1), rt=fn_infer_ret_expr(in->right,fd,depth+1);
+            if(lt==OMNI_TYPE_STR||rt==OMNI_TYPE_STR)return OMNI_TYPE_STR;
+            if(lt==OMNI_TYPE_FLOAT||rt==OMNI_TYPE_FLOAT)return OMNI_TYPE_FLOAT;
+            return OMNI_TYPE_INT;
+        }
+        default: return OMNI_TYPE_INT;
+    }
+}
+static OmniType fn_infer_ret_type(AST_Statement_FnDef*fd){
+    OmniType t=OMNI_TYPE_INT;
+    if(!fd->body) return t;
+    for(int i=0;i<fd->body->statement_count;i++){
+        AST_Statement*s=fd->body->statements[i];
+        if(s&&s->type==RETURN_STATEMENT){
+            AST_Statement_Return*r=(AST_Statement_Return*)s;
+            OmniType rt=fn_infer_ret_expr(r->return_value,fd,0);
+            if(rt!=OMNI_TYPE_INT) t=rt; /* first non-int return wins */
+        }
+    }
+    return t;
+}
 static FnEntry* fn_register(CodeGen* cg,const char* name,int param_count){if(cg->fn_count>=MAX_FUNCTIONS){fprintf(stderr,"Fatal: too many functions\n");exit(1);}FnEntry*e=&cg->fn_table[cg->fn_count++];strncpy_s(e->name,sizeof(e->name),name,_TRUNCATE);e->code_offset=0;e->param_count=param_count;e->resolved=0;e->is_inline=0;e->inline_ast=NULL;return e;}
 
 // ============================================================
@@ -2124,6 +2236,51 @@ static int fn_is_inlineable(AST_Statement_FnDef*fd){
    Handles both single-expr and multi-statement inlineable functions.
    Creates a mini scope with params mapped to stack slots, emits body stmts.
    OPT: No CALL/RET overhead, no frame setup — just inline code emission. */
+/* FIX(finding #13): inlined bodies containing `return` inside if/else used to
+   route through cg_stmt → cg_return_statement, which emits a PHYSICAL
+   `mov rsp,rbp; pop rbp; ret` into the CALLER's stream — ending the caller
+   (or the whole program) at the first inlined branch. This emitter mirrors
+   cg_if_statement but translates every `return expr` into
+   "eval expr → RAX; jmp inline_end". All forward jumps are resolved to the
+   point right after the inlined body, where RAX holds the result. */
+static void cg_inline_stmts(CodeGen*cg,AST_Statement**stmts,int count,
+                            size_t*jmps,int*jn,int max_jumps,int depth){
+    if(!stmts||depth>8) return; /* depth guard: inlineable bodies are ≤8 stmts */
+    for(int i=0;i<count;i++){
+        AST_Statement*s=stmts[i];
+        if(!s)continue;
+        switch(s->type){
+            case RETURN_STATEMENT:{
+                AST_Statement_Return*r=(AST_Statement_Return*)s;
+                if(r->return_value)cg_expr(cg,r->return_value);
+                else emit_xor_rax_rax(&cg->code);
+                if(*jn<max_jumps) jmps[(*jn)++]=emit_jmp_fwd(&cg->code);
+                break;
+            }
+            case IF_STATEMENT:{
+                AST_Statement_If*is=(AST_Statement_If*)s;
+                cg_expr(cg,is->condition);emit_test_rax(&cg->code);
+                size_t jfalse=emit_je_fwd(&cg->code);
+                cg_inline_stmts(cg,is->consequence?is->consequence->statements:NULL,
+                                is->consequence?is->consequence->statement_count:0,
+                                jmps,jn,max_jumps,depth+1);
+                if(is->alternative){
+                    size_t jend=emit_jmp_fwd(&cg->code);
+                    resolve_fwd(&cg->code,jfalse);
+                    cg_inline_stmts(cg,&is->alternative,1,jmps,jn,max_jumps,depth+1);
+                    resolve_fwd(&cg->code,jend);
+                } else {
+                    resolve_fwd(&cg->code,jfalse);
+                }
+                break;
+            }
+            default:
+                cg_stmt(cg,s);
+                break;
+        }
+    }
+}
+
 static void cg_inline_call(CodeGen*cg,FnEntry*fe,AST_Expression**args,int argc){
     AST_Statement_FnDef*fd=(AST_Statement_FnDef*)fe->inline_ast;
     int base_off=cg->scope->next_offset;
@@ -2152,17 +2309,13 @@ static void cg_inline_call(CodeGen*cg,FnEntry*fe,AST_Expression**args,int argc){
     int saved_next=cg->scope->next_offset;
     int saved_ret=cg->returned;
     cg->scope=mini;
-    /* Emit each statement in the function body */
-    for(int i=0;i<fd->body->statement_count;i++){
-        AST_Statement*s=fd->body->statements[i];
-        if(!s)continue;
-        if(s->type==RETURN_STATEMENT){
-            AST_Statement_Return*r=(AST_Statement_Return*)s;
-            if(r->return_value)cg_expr(cg,r->return_value);
-            else emit_xor_rax_rax(&cg->code);
-            break; /* inline return = just leave result in RAX */
-        }
-        cg_stmt(cg,s);
+    /* Emit the body with return→jmp translation (see cg_inline_stmts above).
+       All inlined returns jump here — right after the body — where RAX holds
+       the inlined call's result. */
+    {
+        size_t jmps[32]; int jn=0;
+        cg_inline_stmts(cg,fd->body->statements,fd->body->statement_count,jmps,&jn,32,0);
+        for(int k=0;k<jn;k++) resolve_fwd(&cg->code,jmps[k]);
     }
     /* Restore caller scope */
     scope_free(mini);
@@ -2462,24 +2615,13 @@ static OmniType infer_type(CodeGen*cg,AST_Expression*expr){
                 const char*fn=((AST_Expression_Identifier*)c->function)->value;
                 if(strcmp(fn,"input")==0||strcmp(fn,"str")==0)return OMNI_TYPE_STR;
                 if(strcmp(fn,"int")==0||strcmp(fn,"len")==0)return OMNI_TYPE_INT;
+                /* user-defined fn: use the statically inferred return type */
+                FnEntry*ufe=fn_find(cg,fn);
+                if(ufe) return ufe->ret_type;
             }
             if(c->function&&c->function->type==MEMBER_ACCESS_EXPRESSION){
                 AST_Expression_MemberAccess*ma=(AST_Expression_MemberAccess*)c->function;
-                if(strcmp(ma->member,"format")==0||strcmp(ma->member,"format_date")==0||
-                   strcmp(ma->member,"format_time")==0||strcmp(ma->member,"weekday_name")==0||
-                   strcmp(ma->member,"month_name")==0||strcmp(ma->member,"cwd")==0||
-                   strcmp(ma->member,"platform")==0||strcmp(ma->member,"arch")==0||
-                   strcmp(ma->member,"version")==0||strcmp(ma->member,"omni_ver")==0||
-                   strcmp(ma->member,"read")==0||strcmp(ma->member,"getenv")==0||
-                   strcmp(ma->member,"concat")==0||strcmp(ma->member,"slice")==0||
-                   strcmp(ma->member,"fromint")==0||strcmp(ma->member,"fromfloat")==0||
-                   strcmp(ma->member,"upper")==0||strcmp(ma->member,"lower")==0||
-                   strcmp(ma->member,"trim")==0||strcmp(ma->member,"lstrip")==0||
-                   strcmp(ma->member,"rstrip")==0||strcmp(ma->member,"strip")==0||
-                   strcmp(ma->member,"reverse")==0||strcmp(ma->member,"replace")==0||
-                   strcmp(ma->member,"repeat")==0||strcmp(ma->member,"pad_left")==0||
-                   strcmp(ma->member,"pad_right")==0||strcmp(ma->member,"to_upper_first")==0||
-                   strcmp(ma->member,"to_lower_first")==0||strcmp(ma->member,"input")==0) return OMNI_TYPE_STR;
+                if(member_returns_str(ma->member)) return OMNI_TYPE_STR;
                 // math functions that return float
                 if(strcmp(ma->member,"sqrt")==0||strcmp(ma->member,"pow")==0||
                    strcmp(ma->member,"floor")==0||strcmp(ma->member,"ceil")==0||
@@ -3153,6 +3295,13 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
             cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_ai_get);cg->scope->next_offset-=8;return;}
+        // get_i8/get_u8(arr,idx) -> sign/zero-extended byte (INT8 API, finding #16)
+        if((strcmp(method,"get_i8")==0||strcmp(method,"get_u8")==0)&&argc==2){
+            int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
+            cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
+            cg_call_extern(cg,strcmp(method,"get_i8")==0?g_fn_ai_get_i8:g_fn_ai_get_u8);
+            cg->scope->next_offset-=8;return;}
         // set(arr,idx,val)
         if(strcmp(method,"set")==0&&argc==3){
             int s0=cg->scope->next_offset;cg->scope->next_offset+=8;
@@ -3164,6 +3313,19 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
             emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_ai_set);emit_xor_rax_rax(&cg->code);
+            cg->scope->next_offset-=24;return;}
+        // set_i8/set_u8(arr,idx,val) — byte-width element store (finding #16)
+        if((strcmp(method,"set_i8")==0||strcmp(method,"set_u8")==0)&&argc==3){
+            int s0=cg->scope->next_offset;cg->scope->next_offset+=8;
+            int s1=cg->scope->next_offset;cg->scope->next_offset+=8;
+            int s2=cg->scope->next_offset;cg->scope->next_offset+=8;
+            if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
+            cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
+            cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
+            cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
+            cg_call_extern(cg,strcmp(method,"set_i8")==0?g_fn_ai_set_i8:g_fn_ai_set_u8);
+            emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=24;return;}
         // fill(arr,val,n)
         if(strcmp(method,"fill")==0&&argc==3){
@@ -4178,17 +4340,6 @@ static void cg_for_range(CodeGen*cg,AST_Statement_For*stmt,AST_Expression_Call*r
                 }
             }
 
-            // Loop top: compare counter vs stop
-            size_t loop_top = cg->code.size;
-            emit_load_rcx(&cg->code, stop_slot);
-            if(reg_level==0) emit_cmp_r14_rcx(&cg->code);
-            else             emit_cmp_r15_rcx(&cg->code);
-            size_t jge = emit_jge_fwd(&cg->code);
-
-            // Sync register into stack var at loop top so body reads it correctly
-            // cg_identifier already handles reg_var_names → emit_mov_rax_r14/r15
-            // so body reads of iter_name go to register directly — no sync needed
-
             // Pin hottest accumulator from for-body into RBX/R12/R13
             // e.g. 'set s = s + i' — s is used every iteration and benefits from pinning
             int fbody_base=cg->reg_var_depth;
@@ -4227,6 +4378,17 @@ static void cg_for_range(CodeGen*cg,AST_Statement_For*stmt,AST_Expression_Call*r
                     fbody_nsaved++;
                 }
             }
+            // Loop top: compare counter vs stop
+            size_t loop_top = cg->code.size;
+            emit_load_rcx(&cg->code, stop_slot);
+            if(reg_level==0) emit_cmp_r14_rcx(&cg->code);
+            else             emit_cmp_r15_rcx(&cg->code);
+            size_t jge = emit_jge_fwd(&cg->code);
+
+            // Sync register into stack var at loop top so body reads it correctly
+            // cg_identifier already handles reg_var_names → emit_mov_rax_r14/r15
+            // so body reads of iter_name go to register directly — no sync needed
+
             // Body
             for(int i=0;i<stmt->body->statement_count;i++) cg_stmt(cg,stmt->body->statements[i]);
 
@@ -5006,6 +5168,7 @@ int codegen_compile(CodeGen*cg,AST_Program*program){
         if(s&&s->type==FN_DEFINITION){
             AST_Statement_FnDef*fd=(AST_Statement_FnDef*)s;
             FnEntry*fe=fn_register(cg,fd->name->value,fd->parameter_count);
+            fe->ret_type=fn_infer_ret_type(fd);
             if(fn_is_inlineable(fd)){fe->is_inline=1;fe->inline_ast=(void*)fd;}
         }
         if(s&&s->type==CLASS_DEFINITION){
@@ -5113,18 +5276,96 @@ static int omni_exec_rx(void* p,size_t sz){
 static void omni_exec_free(void* p,size_t sz){ munmap(p,sz); }
 #endif
 
+/* Weak hook so the host can map a faulting PC back to a JIT offset
+   (diagnostics only — see OMNI_JIT_DEBUG in main.c). */
+void codegen_set_jit_region(void* mem, size_t sz) {
+    extern void omni_host_set_jit_region(void* mem, size_t sz);
+    omni_host_set_jit_region(mem, sz);
+}
+void omni_host_set_jit_region(void* mem, size_t sz); /* defined in main.c */
+
 int64_t codegen_run(CodeGen*cg){
     if(cg->code.size==0){fprintf(stderr,"CodeGen: nothing to run\n");return -1;}
     void*mem=omni_exec_alloc(cg->code.size);
     if(!mem||mem==(void*)-1){fprintf(stderr,"CodeGen: executable-memory allocation failed\n");return -1;}
     memcpy(mem,cg->code.data,cg->code.size);
+    codegen_set_jit_region(mem, cg->code.size);
+    /* TEMP DIAGNOSTIC (OMNI_JIT_DEBUG): capture callee-saved RBX + buffer
+       checksum around the JIT call to attribute corruption precisely.
+       Runs BEFORE mprotect so patch/save writes hit RW memory. */
+    long rbx_before=0, rbx_after=0;
+    int jitdbg = getenv("OMNI_JIT_DEBUG") != NULL;
+    if (jitdbg) {
+        __asm__ volatile("mov %%rbx, %0" : "=r"(rbx_before));
+        fprintf(stderr,"[jitdbg] before: rbx=%p size=%zu\n",(void*)(uintptr_t)rbx_before,cg->code.size);
+        fflush(stderr);
+        const char* save = getenv("OMNI_JIT_SAVE");
+        if (save) {
+            FILE* sf = fopen(save, "wb");
+            if (sf) { fwrite(mem, 1, cg->code.size, sf); fclose(sf);
+                      fprintf(stderr, "[jitdbg] saved executed bytes to %s\n", save); fflush(stderr); }
+        }
+        /* OMNI_JIT_PATCH=1 → NOP the 1st call rax (omni_runtime_init)
+           OMNI_JIT_PATCH=2 → NOP the 2nd call rax (print helper)
+           OMNI_JIT_PATCH=3 → NOP both */
+        const char* patch = getenv("OMNI_JIT_PATCH");
+        if (patch) {
+            int mode = atoi(patch);
+            size_t found = 0;
+            for (size_t i = 0; i + 2 <= cg->code.size; i++) {
+                if (((unsigned char*)mem)[i] == 0x48 && ((unsigned char*)mem)[i+1] == 0xB8) {
+                    size_t j = i + 10; /* call rax right after imm64 */
+                    if (j + 2 <= cg->code.size && ((unsigned char*)mem)[j] == 0xFF && ((unsigned char*)mem)[j+1] == 0xD0) {
+                        found++;
+                        if (mode & 1 && found == 1) { ((unsigned char*)mem)[j] = 0x90; ((unsigned char*)mem)[j+1] = 0x90;
+                            fprintf(stderr, "[jitdbg] NOPed call#1 at off 0x%zx\n", j); }
+                        if (mode & 2 && found == 2) { ((unsigned char*)mem)[j] = 0x90; ((unsigned char*)mem)[j+1] = 0x90;
+                            fprintf(stderr, "[jitdbg] NOPed call#2 at off 0x%zx\n", j); }
+                    }
+                }
+            }
+        }
+    }
     if(omni_exec_rx(mem,cg->code.size)!=0){
         fprintf(stderr,"CodeGen: failed to make JIT memory executable\n");
         omni_exec_free(mem,cg->code.size);
         return -1;
     }
+    long rbx_b2=0,r12_b2=0,r13_b2=0,r14_b2=0,r15_b2=0,rbp_b2=0,rsp_b2=0;
+    if (jitdbg) {
+        __asm__ volatile("mov %%rbx,%0\n mov %%r12,%1\n mov %%r13,%2\n mov %%r14,%3\n mov %%r15,%4\n mov %%rbp,%5\n mov %%rsp,%6"
+                         : "=r"(rbx_b2),"=r"(r12_b2),"=r"(r13_b2),"=r"(r14_b2),"=r"(r15_b2),"=r"(rbp_b2),"=r"(rsp_b2));
+        fprintf(stderr,"[jitdbg] pre-call regs: rbx=%p r12=%p r13=%p r14=%p r15=%p rbp=%p rsp=%p\n",
+                (void*)rbx_b2,(void*)r12_b2,(void*)r13_b2,(void*)r14_b2,(void*)r15_b2,(void*)rbp_b2,(void*)rsp_b2);
+        fflush(stderr);
+    }
     typedef int64_t(*OmniEntry)(void);
     int64_t result=((OmniEntry)mem)();
+    if (jitdbg) {
+        long rsp_after=0,rbp_a2=0,r12_a2=0,r13_a2=0,r14_a2=0,r15_a2=0;
+        __asm__ volatile("mov %%rsp, %0\n mov %%rbp,%1\n mov %%r12,%2\n mov %%r13,%3\n mov %%r14,%4\n mov %%r15,%5"
+                         : "=r"(rsp_after),"=r"(rbp_a2),"=r"(r12_a2),"=r"(r13_a2),"=r"(r14_a2),"=r"(r15_a2));
+        __asm__ volatile("mov %%rbx, %0" : "=r"(rbx_after));
+        fprintf(stderr,"[jitdbg] post-call regs: rbx=%p r12=%p r13=%p r14=%p r15=%p rbp=%p rsp=%p rax=%lld\n",
+                (void*)(uintptr_t)rbx_after,(void*)r12_a2,(void*)r13_a2,(void*)r14_a2,(void*)r15_a2,
+                (void*)rbp_a2,(void*)rsp_after,(long long)result);
+        fprintf(stderr,"[jitdbg] after: rbx=%p rax=%lld  (mem=%p cg=%p code.data=%p)\n",
+                (void*)(uintptr_t)rbx_after,(long long)result,
+                mem,(void*)(uintptr_t)cg,(void*)(uintptr_t)cg->code.data);
+        if (getenv("OMNI_JIT_FRAME")) {
+            /* Capture FIRST (no fprintf in between — its frames would
+               overwrite the JIT's stale frame below rsp). */
+            long snap[32];
+            for (int k = 0; k < 32; k++) snap[k] = *(long*)(rsp_after - 8 * (k + 1));
+            for (int k = 0; k < 32; k++)
+                fprintf(stderr, "[jitdbg]   [rsp%+#lx] = %p\n", (long)(-8 * (k + 1)),
+                        (void*)(uintptr_t)snap[k]);
+        }
+        fflush(stderr);
+        unsigned long sum2=0; for(size_t i=0;i<cg->code.size;i++) sum2=sum2*31+((unsigned char*)mem)[i];
+        fprintf(stderr,"[jitdbg] after: buffer_sum=%lx\n",sum2);
+        fflush(stderr);
+    }
     omni_exec_free(mem,cg->code.size);
     return result;
 }
