@@ -1,9 +1,0 @@
-# Test Barrett modulo
-set a = 7 % 3
-print(a)
-set b = 17 % 5
-print(b)
-set c = 100 % 13
-print(c)
-set d = 255 % 17
-print(d)

@@ -1,8 +1,0 @@
-# Isolate: single fn call, capture return, print
-fn triple(n):
-    set r = n * 3
-    return r
-
-set x = triple(7)
-print(x)
-# Expected: 21

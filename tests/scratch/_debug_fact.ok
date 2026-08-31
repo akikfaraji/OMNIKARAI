@@ -1,8 +1,0 @@
-fn factorial(n):
-    print(n)
-    if n <= 1:
-        return 1
-    set r = n * factorial(n - 1)
-    return r
-
-print(factorial(3))

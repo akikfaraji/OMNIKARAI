@@ -1,5 +1,0 @@
-set j = 0
-print(j)
-while j < 6:
-    set j = j + 1
-    print(j)

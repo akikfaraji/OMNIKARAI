@@ -1,4 +1,0 @@
-set a = 10
-set b = 3
-print(a != b)
-print(b < a)

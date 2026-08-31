@@ -1,7 +1,0 @@
-set t = 0
-for i in range(3, 6):
-    print(i)
-    set t = t + i
-    print(t)
-print(t)
-return 0

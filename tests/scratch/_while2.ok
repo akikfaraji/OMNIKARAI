@@ -1,7 +1,0 @@
-set j = 0
-while j < 6:
-    set j = j + 1
-    if j == 3:
-        continue
-    print(j)
-return 0

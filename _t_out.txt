@@ -1,4 +1,0 @@
-[omnicc] parsed 1 statement(s) from 'test2.ok'
-[omnicc] running 72 bytes of native x86-64 code...
-Hello World! From Omnikarai!
-[omnicc] done in 0.116 ms | exit_code=0

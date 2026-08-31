@@ -14,36 +14,20 @@ bin/
 benchmarks/*.exe
 benchmarks/*.obj
 benchmarks/*.o
+benchmarks/*.out
 
 # ── Temp / scratch files ───────────────────────────────────────────
 tmp_input.txt
-_err.txt
-_out.txt
 _*.ok
+_*.txt
 *.tmp
-
-# ── Loose root-level test files (move to tests/ eventually) ────────
-test1.ok
-test2.ok
-test3.ok
-test4.ok
-test_fn_debug.ok
-test_matmul_small.ok
-test_modules.ok
-test_pkg_syntax.ok
-test_use.ok
 hello.ok
-hello.py
-
-# ── Dev scratch scripts ────────────────────────────────────────────
-scripts/
+hello
 
 # ── Internal journals / personal notes ────────────────────────────
 journal.txt
 Bench_results.txt
-
-# ── Docs (not ready for public) ───────────────────────────────────
-docs/
+docs_internal/
 
 # ── Build artifacts ────────────────────────────────────────────────
 *.log
@@ -60,11 +44,3 @@ desktop.ini
 .idea/
 *.suo
 *.user
-
-# openclaw noise
-.openclaw/
-.gitnexus
-
-# Claude noise
-.claude/
-CLAUDE.md

@@ -1,6 +1,0 @@
-use time
-
-set t = time.now()
-time.sleep(5)
-set label = time.format(t)
-print(label)

@@ -1,7 +1,0 @@
-use time
-
-set t = time.now()
-set us = time.us(t)
-set ns = time.ns(t)
-print(us)
-print(ns)

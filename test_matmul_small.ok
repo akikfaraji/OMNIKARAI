@@ -1,3 +1,0 @@
-use ai.dot as dot 
-
-print(dot(12))

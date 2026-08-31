@@ -1,6 +1,0 @@
-set t = 0
-for i in range(3, 6):
-    set t = t + i
-print(99)
-print(t)
-return 0

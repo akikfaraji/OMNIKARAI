@@ -1,4 +1,0 @@
-# debug_step2.ok
-set a = 10
-set b = 3
-print(a % b)
