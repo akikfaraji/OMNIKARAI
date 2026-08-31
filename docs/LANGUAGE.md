@@ -153,3 +153,15 @@ omnicc dump hello.ok       # dump generated x86-64 machine code
 `omnicc build` produces a copy of the omnicc engine with your program
 embedded; the copy recompiles the program in-process at startup, so the
 result runs on any machine of the same platform with nothing installed.
+(True freestanding binary output is planned — see
+[ROADMAP.md](ROADMAP.md) V01.02.)
+
+## Language evolution
+
+This reference describes the language **as implemented**. Planned
+additions — the dual memory model, package-system surface, architecture
+support — are tracked as design requirements in
+[MEMORY_MODEL.md](MEMORY_MODEL.md), [PACKAGE_ECOSYSTEM.md](PACKAGE_ECOSYSTEM.md)
+and [PLATFORM_SUPPORT.md](PLATFORM_SUPPORT.md), sequenced in
+[ROADMAP.md](ROADMAP.md). Nothing is added to this reference until it
+exists and is tested.
