@@ -13,7 +13,27 @@
 #ifndef OMNI_PLATFORM_H
 #define OMNI_PLATFORM_H
 
-#ifndef _WIN32
+// ── Shared platform-neutral definitions ─────────────────────
+// Path separator used by generated-language os/io helpers and by
+// the package loader. Backslash on Windows, forward slash elsewhere.
+#ifdef _WIN32
+#  define OMNI_PATH_SEP '\\'
+#else
+#  define OMNI_PATH_SEP '/'
+#endif
+
+#ifdef _WIN32
+
+/* Native Win32: pull in the real API. Nothing to shim. */
+#  define WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+
+#else /* POSIX compatibility layer */
+
+/* Expose POSIX.1-2008 APIs (clock_gettime, gmtime_r, timegm, tm_gmtoff,
+   posix_memalign, nanosleep, strcasecmp) under -std=c99. */
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE 1
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -244,6 +264,198 @@ static inline void* omni_aligned_malloc(size_t size, size_t align) {
 }
 #define _aligned_malloc(sz, al) omni_aligned_malloc((size_t)(sz), (size_t)(al))
 #define _aligned_free(p) free(p)
+
+// ── Extended filesystem ops ─────────────────────────────────
+static inline BOOL MoveFileA(const char* from, const char* to) {
+    return rename(from, to) == 0;
+}
+static inline BOOL CopyFileA(const char* src, const char* dst, BOOL fail_if_exists) {
+    if (fail_if_exists) {
+        struct stat st;
+        if (stat(dst, &st) == 0) return 0;
+    }
+    FILE* in = fopen(src, "rb");  if (!in) return 0;
+    FILE* out = fopen(dst, "wb"); if (!out) { fclose(in); return 0; }
+    char buf[65536]; size_t n; BOOL ok = 1;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { ok = 0; break; }
+    if (ferror(in)) ok = 0;
+    fclose(in);
+    if (fclose(out) != 0) ok = 0;
+    if (!ok) unlink(dst);
+    return ok;
+}
+/* GetFullPathNameA: resolve to an absolute, canonical path (no symlink
+   resolution beyond what realpath does; falls back to CWD-join when the
+   final component does not exist yet, matching Win32 semantics). */
+static inline DWORD GetFullPathNameA(const char* path, DWORD len, char* buf, char** filepart) {
+    if (filepart) *filepart = NULL;
+    char resolved[4096];
+    const char* rp = realpath(path, resolved);
+    if (!rp) {
+        /* Win32 resolves even non-existent final components: try the parent. */
+        char tmp[4096];
+        snprintf(tmp, sizeof(tmp), "%s", path);
+        char* slash = strrchr(tmp, '/');
+        if (slash && slash != tmp) {
+            *slash = '\0';
+            const char* rp2 = realpath(tmp, resolved);
+            if (rp2) {
+                size_t d = strlen(resolved);
+                if (d + 1 + strlen(slash + 1) < sizeof(resolved)) {
+                    resolved[d] = '/';
+                    strcpy(resolved + d + 1, slash + 1);
+                    rp = resolved;
+                }
+            }
+        } else if (!slash) { /* bare filename relative to CWD */
+            char cwd[2048];
+            if (getcwd(cwd, sizeof(cwd))) {
+                snprintf(resolved, sizeof(resolved), "%s/%s", cwd, path);
+                rp = resolved;
+            }
+        }
+    }
+    if (!rp) { if (len > 0 && buf) buf[0] = '\0'; return 0; }
+    size_t l = strlen(rp);
+    if (l + 1 > (size_t)len) return (DWORD)l; /* required-size semantics */
+    memcpy(buf, rp, l + 1);
+    if (filepart) {
+        const char* base = strrchr(buf, '/');
+        *filepart = base ? (char*)(buf + (base - buf) + 1) : buf;
+    }
+    return (DWORD)l;
+}
+
+// ── Memory status (sys module) ──────────────────────────────
+typedef struct {
+    DWORD     dwLength;
+    DWORD     dwMemoryLoad;
+    uint64_t  ullTotalPhys;
+    uint64_t  ullAvailPhys;
+    uint64_t  ullTotalPageFile;
+    uint64_t  ullAvailPageFile;
+    uint64_t  ullTotalVirtual;
+    uint64_t  ullAvailVirtual;
+} MEMORYSTATUSEX;
+static inline BOOL GlobalMemoryStatusEx(MEMORYSTATUSEX* ms) {
+    long pages  = sysconf(_SC_PHYS_PAGES);
+    long psize  = sysconf(_SC_PAGE_SIZE);
+    ms->ullTotalPhys  = (pages > 0 && psize > 0) ? (uint64_t)pages * (uint64_t)psize : 0;
+    ms->ullAvailPhys  = 0; /* no portable POSIX equivalent; call site uses TotalPhys */
+    ms->dwMemoryLoad  = 0;
+    ms->ullTotalVirtual = ms->ullTotalPhys;
+    ms->ullAvailVirtual = ms->ullAvailPhys;
+    return 1;
+}
+
+// ── Directory iteration (package loader) ────────────────────
+#include <dirent.h>
+#include <fnmatch.h>
+typedef struct {
+    DWORD dwFileAttributes;
+    char  cFileName[MAX_PATH];
+} WIN32_FIND_DATAA;
+typedef struct { DIR* dir; char glob[MAX_PATH]; } OMNI_FIND_CTX;
+/* pattern = "<dir><sep>*.ok" — splits on the last '/' or '\' and matches
+   with fnmatch, skipping "." and ".." as Win32 does. The glob text is
+   retained in the ctx so FindNextFileA filters with the same pattern. */
+static inline HANDLE FindFirstFileA(const char* pattern, WIN32_FIND_DATAA* fd) {
+    char dir[4096];
+    const char* glob = strrchr(pattern, '/');
+    const char* winsep = strrchr(pattern, '\\');
+    if (winsep && (!glob || winsep > glob)) glob = winsep;
+    if (glob) {
+        size_t d = (size_t)(glob - pattern);
+        if (d >= sizeof(dir)) return INVALID_HANDLE_VALUE;
+        memcpy(dir, pattern, d); dir[d] = '\0';
+        glob++;
+    } else { dir[0] = '.'; dir[1] = '\0'; glob = pattern; }
+    DIR* d = opendir(dir[0] ? dir : ".");
+    if (!d) return INVALID_HANDLE_VALUE;
+    OMNI_FIND_CTX* ctx = (OMNI_FIND_CTX*)malloc(sizeof(OMNI_FIND_CTX));
+    if (!ctx) { closedir(d); return INVALID_HANDLE_VALUE; }
+    ctx->dir = d;
+    snprintf(ctx->glob, MAX_PATH, "%s", glob);
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (fnmatch(ctx->glob, e->d_name, 0) != 0) continue;
+        snprintf(fd->cFileName, MAX_PATH, "%s", e->d_name);
+        char full[4352];
+        snprintf(full, sizeof(full), "%s/%s", dir[0] ? dir : ".", e->d_name);
+        fd->dwFileAttributes = GetFileAttributesA(full);
+        return (HANDLE)ctx;
+    }
+    closedir(d); free(ctx);
+    return INVALID_HANDLE_VALUE;
+}
+static inline BOOL FindNextFileA(HANDLE h, WIN32_FIND_DATAA* fd) {
+    if (!h) return 0;
+    OMNI_FIND_CTX* ctx = (OMNI_FIND_CTX*)h;
+    struct dirent* e;
+    while ((e = readdir(ctx->dir)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (fnmatch(ctx->glob, e->d_name, 0) != 0) continue;
+        snprintf(fd->cFileName, MAX_PATH, "%s", e->d_name);
+        fd->dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+        return 1;
+    }
+    return 0;
+}
+static inline BOOL FindClose(HANDLE h) {
+    if (!h) return 0;
+    OMNI_FIND_CTX* ctx = (OMNI_FIND_CTX*)h;
+    closedir(ctx->dir); free(ctx);
+    return 1;
+}
+
+// ── File open / size (package source reading) ───────────────
+#define INVALID_FILE_SIZE 0xFFFFFFFFu
+static inline HANDLE CreateFileA(const char* path, DWORD access, DWORD share,
+                                 void* sa, DWORD disposition, DWORD flags, void* tmpl) {
+    (void)share; (void)sa; (void)flags; (void)tmpl;
+    const char* mode = (access & GENERIC_WRITE) ? "wb" : "rb";
+    if (access & GENERIC_WRITE && disposition == OPEN_EXISTING) mode = "r+b";
+    FILE* f = fopen(path, mode);
+    return (HANDLE)f;
+}
+static inline DWORD GetFileSize(HANDLE h, DWORD* high) {
+    if (high) *high = 0;
+    FILE* f = (FILE*)h;
+    long cur = ftell(f);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, cur, SEEK_SET);
+    return (sz < 0) ? INVALID_FILE_SIZE : (DWORD)sz;
+}
+#define INVALID_FILE_SIZE 0xFFFFFFFFu
+
+// ── Executable memory (JIT / in-memory execution) ───────────
+// W^X discipline: allocate RW, then flip to RX once code emission ends.
+#define MEM_COMMIT         0x00001000u
+#define MEM_RESERVE        0x00002000u
+#define MEM_RELEASE        0x00008000u
+#define PAGE_READWRITE     0x04u
+#define PAGE_EXECUTE_READ  0x20u
+#include <sys/mman.h>
+static inline void* VirtualAlloc(void* base, size_t sz, DWORD type, DWORD protect) {
+    (void)base; (void)type;
+    int prot = (protect == PAGE_EXECUTE_READ) ? (PROT_READ | PROT_EXEC)
+                                              : (PROT_READ | PROT_WRITE);
+    void* p = mmap(NULL, sz, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return (p == MAP_FAILED) ? NULL : p;
+}
+static inline BOOL VirtualProtect(void* p, size_t sz, DWORD newprot, DWORD* oldprot) {
+    (void)oldprot;
+    int prot = (newprot == PAGE_EXECUTE_READ) ? (PROT_READ | PROT_EXEC)
+                                              : (PROT_READ | PROT_WRITE);
+    return mprotect(p, sz, prot) == 0;
+}
+static inline BOOL VirtualFree(void* p, size_t sz, DWORD type) {
+    (void)type;
+    return munmap(p, sz) == 0;
+}
 
 #endif /* !_WIN32 */
 #endif /* OMNI_PLATFORM_H */

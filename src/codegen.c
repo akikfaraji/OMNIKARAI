@@ -65,10 +65,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <ctype.h>
 #include <math.h>
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#include "omni_platform.h"   // platform layer (Win32 native / POSIX shims)
+#include "abi.h"             // calling-convention abstraction
 
 #include "codegen.h"
 #include "ast.h"
@@ -145,6 +146,7 @@ static void omni_io_init(void) {
     if (g_stdin  == INVALID_HANDLE_VALUE) g_stdin  = GetStdHandle(STD_INPUT_HANDLE);
 }
 static void omni_time_init(void); // forward decl — defined in TIME MODULE below
+static const char* alias_resolve(CodeGen* cg, const char* ns); // forward decl — defined in ALIAS section below
 __attribute__((noinline)) void omni_runtime_init(void) {
     omni_io_init();
     omni_time_init();  // pre-init QPC freq so first timer call is instant
@@ -482,7 +484,13 @@ __attribute__((noinline)) char* omni_os_getenv(const char* name) {
     char* v = getenv(name);
     return v ? v : (char*)"";
 }
-__attribute__((noinline)) const char* omni_os_platform(void) { return "windows"; }
+__attribute__((noinline)) const char* omni_os_platform(void) {
+#if defined(_WIN32)
+    return "windows";
+#else
+    return "linux";
+#endif
+}
 __attribute__((noinline)) char* omni_os_cwd(void) {
     char* buf=(char*)malloc(512);
     if(!buf) return (char*)"";
@@ -542,7 +550,13 @@ __attribute__((noinline)) int64_t omni_io_size(const char* path) {
 //  SYS MODULE
 // ============================================================
 __attribute__((noinline)) const char* omni_sys_version(void)   { return "Omnikarai v6.02.24 (x86-64 Windows)"; }
-__attribute__((noinline)) const char* omni_sys_platform(void)  { return "windows-x64"; }
+__attribute__((noinline)) const char* omni_sys_platform(void) {
+#if defined(_WIN32)
+    return "windows-x64";
+#else
+    return "linux-x64";
+#endif
+}
 __attribute__((noinline)) const char* omni_sys_arch(void)      { return "x86_64"; }
 __attribute__((noinline)) const char* omni_sys_omni_ver(void)  { return "6.02.24"; }
 __attribute__((noinline)) int64_t     omni_sys_bits(void)      { return 64; }
@@ -700,8 +714,9 @@ __attribute__((noinline)) char* omni_os_join(const char* a, const char* b) {
     if(!a) a=""; if(!b) b="";
     size_t la=strlen(a),lb=strlen(b);
     char* r=(char*)malloc(la+lb+2);
+    if(!r) return (char*)"";
     memcpy(r,a,la);
-    if(la>0&&a[la-1]!='/'&&a[la-1]!='\\'){r[la]='\\';la++;}
+    if(la>0&&a[la-1]!='/'&&a[la-1]!='\\'){r[la]=OMNI_PATH_SEP;la++;}
     memcpy(r+la,b,lb); r[la+lb]=0;
     return r;
 }
@@ -1694,6 +1709,57 @@ static void emit_load_rdx(CodeBuf*b,int off){emit_u8(b,REX_W);emit_u8(b,0x8B);em
 static void emit_load_r8(CodeBuf*b,int off) {emit_u8(b,REX_WR);emit_u8(b,0x8B);emit_u8(b,0x85);emit_u32(b,(uint32_t)(-off));}
 static void emit_load_r9(CodeBuf*b,int off) {emit_u8(b,REX_WR);emit_u8(b,0x8B);emit_u8(b,0x8D);emit_u32(b,(uint32_t)(-off));}
 
+
+// ── ABI argument-register helpers (see include/abi.h) ───────────────────────
+// Generated code loads call arguments through emit_load_argN / emit_mov_argN_*
+// so the same compiler source targets Win64 and SysV ABIs.
+// Win64: arg0..3 = RCX,RDX,R8,R9      SysV: arg0..3 = RDI,RSI,RDX,RCX
+// arg4/arg5 (5/6-arg extern calls): Win64 = stack ([rsp+32]/[rsp+40]);
+// SysV = R8/R9. emit_stack_arg handles the stack-arg case per ABI.
+static void emit_load_rdi(CodeBuf*b,int off){emit_u8(b,REX_W);emit_u8(b,0x8B);emit_u8(b,0xBD);emit_u32(b,(uint32_t)(-off));}
+static void emit_load_rsi(CodeBuf*b,int off){emit_u8(b,REX_W);emit_u8(b,0x8B);emit_u8(b,0xB5);emit_u32(b,(uint32_t)(-off));}
+/* MOV RSI,RAX: 48 89 C6 — RSI/RDI are callee-saved on Win64 (pinned-var slots
+   5/6 there) and caller-saved volatile on SysV (no pinning on that ABI). */
+static void emit_mov_rdi_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC7);} /* MOV RDI,RAX: 48 89 C7 */
+static void emit_mov_rsi_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC6);} /* MOV RSI,RAX: 48 89 C6 */
+static void emit_mov_rax_rsi(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x8B);emit_u8(b,0xC6);} /* MOV RAX,RSI: 48 8B C6 */
+static void emit_mov_rax_rdi(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x8B);emit_u8(b,0xC7);} /* MOV RAX,RDI: 48 8B C7 */
+static void emit_mov_rdi_imm64(CodeBuf*b,int64_t v){emit_u8(b,REX_W);emit_u8(b,0xBF);emit_u64(b,(uint64_t)v);}
+static void emit_mov_rsi_imm64(CodeBuf*b,int64_t v){emit_u8(b,REX_W);emit_u8(b,0xBE);emit_u64(b,(uint64_t)v);}
+#if defined(OMNI_ABI_WIN64)
+static void emit_load_arg0(CodeBuf*b,int off){emit_load_rcx(b,off);}
+static void emit_load_arg1(CodeBuf*b,int off){emit_load_rdx(b,off);}
+static void emit_load_arg2(CodeBuf*b,int off){emit_load_r8(b,off);}
+static void emit_load_arg3(CodeBuf*b,int off){emit_load_r9(b,off);}
+static void emit_mov_arg0_rax(CodeBuf*b){emit_mov_rcx_rax(b);}
+static void emit_mov_arg1_rax(CodeBuf*b){emit_mov_rdx_rax(b);}
+static void emit_mov_arg1_rcx(CodeBuf*b){emit_mov_rdx_rcx(b);}
+static void emit_mov_arg0_imm64(CodeBuf*b,int64_t v){emit_mov_rcx_imm64(b,v);}
+static void emit_mov_arg1_imm64(CodeBuf*b,int64_t v){emit_mov_rdx_imm64(b,v);}
+static void emit_stack_arg(CodeBuf*b,int stk_index){ /* value already in RAX */
+    emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0x44);emit_u8(b,0x24);
+    emit_u8(b,(uint8_t)(0x20+stk_index*8)); }                     /* mov [rsp+32+i*8],rax */
+#else
+static void emit_load_arg0(CodeBuf*b,int off){emit_load_rdi(b,off);}
+static void emit_load_arg1(CodeBuf*b,int off){emit_load_rsi(b,off);}
+static void emit_load_arg2(CodeBuf*b,int off){emit_load_rdx(b,off);}
+static void emit_load_arg3(CodeBuf*b,int off){emit_load_rcx(b,off);}
+static void emit_load_arg4(CodeBuf*b,int off){emit_load_r8(b,off);}
+static void emit_load_arg5(CodeBuf*b,int off){emit_load_r9(b,off);}
+static void emit_mov_arg0_rax(CodeBuf*b){emit_mov_rdi_rax(b);}
+static void emit_mov_arg1_rax(CodeBuf*b){emit_mov_rsi_rax(b);}
+static void emit_mov_arg1_rcx(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xCE);} /* MOV RSI,RCX */
+static void emit_mov_arg0_imm64(CodeBuf*b,int64_t v){emit_mov_rdi_imm64(b,v);}
+static void emit_mov_arg1_imm64(CodeBuf*b,int64_t v){emit_mov_rsi_imm64(b,v);}
+static void emit_stack_arg(CodeBuf*b,int stk_index){ /* value already in RAX */
+    emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0x04);emit_u8(b,0x24);
+    emit_u8(b,0x00);/*placeholder*/ (void)stk_index; }
+/* SysV stack args live at [rsp+i*8]; emitted explicitly where used: */
+static void emit_stack_arg_sysv(CodeBuf*b,int stk_index){
+    emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0x44);emit_u8(b,0x24);
+    emit_u8(b,(uint8_t)(stk_index*8)); }                          /* mov [rsp+i*8],rax */
+#endif
+
 static void emit_mov_rcx_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC1);}
 static void emit_mov_rdx_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC2);}
 static void emit_mov_rdx_rcx(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xCA);}  /* MOV RDX,RCX */
@@ -1718,12 +1784,6 @@ static void emit_mov_rax_r12(CodeBuf*b){emit_u8(b,0x4C);emit_u8(b,0x89);emit_u8(
 /* R13 moves: REX.WR 0x89/0x8B mod=11 reg=101 r/m=000 (RAX) */
 static void emit_mov_r13_rax(CodeBuf*b){emit_u8(b,0x49);emit_u8(b,0x89);emit_u8(b,0xC5);} /* MOV R13,RAX */
 static void emit_mov_rax_r13(CodeBuf*b){emit_u8(b,0x4C);emit_u8(b,0x89);emit_u8(b,0xE8);} /* MOV RAX,R13: REX.WR(0x4C) 89 E8 — REX.B=0 keeps r/m=000=RAX */
-/* RSI moves (slot 5): callee-saved on Windows x64 */
-static void emit_mov_rsi_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC6);} /* MOV RSI,RAX: 48 89 C6 */
-static void emit_mov_rax_rsi(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x8B);emit_u8(b,0xC6);} /* MOV RAX,RSI: 48 8B C6 */
-/* RDI moves (slot 6): callee-saved on Windows x64 */
-static void emit_mov_rdi_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC7);} /* MOV RDI,RAX: 48 89 C7 */
-static void emit_mov_rax_rdi(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x8B);emit_u8(b,0xC7);} /* MOV RAX,RDI: 48 8B C7 */
 /* ADD reg,1 — 1-cycle increment directly in pinned register (no RAX roundtrip) */
 /* slot2=RBX: 48 83 C3 01   slot3=R12: 49 83 C4 01   slot4=R13: 49 83 C5 01  */
 /* slot5=RSI: 48 83 C6 01   slot6=RDI: 48 83 C7 01                            */
@@ -2178,19 +2238,19 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
             // UNKNOWN means we can't determine type (e.g. self.field) — treat as str.
             cg_expr(cg,node->left);
             if(lt==OMNI_TYPE_INT||lt==OMNI_TYPE_BOOL||lt==OMNI_TYPE_FLOAT){
-                emit_mov_rcx_rax(&cg->code);
+                emit_mov_arg0_rax(&cg->code);
                 cg_call_extern(cg,g_fn_int_to_str);
             }
             emit_store_rax_t(cg,lhs_slot);
             // Eval right, auto-convert int->str if needed
             cg_expr(cg,node->right);
             if(rt==OMNI_TYPE_INT||rt==OMNI_TYPE_BOOL||rt==OMNI_TYPE_FLOAT){
-                emit_mov_rcx_rax(&cg->code);
+                emit_mov_arg0_rax(&cg->code);
                 cg_call_extern(cg,g_fn_int_to_str);
             }
             emit_store_rax_t(cg,rhs_slot);
-            emit_load_rcx_t(cg,lhs_slot);
-            emit_load_rdx_t(cg,rhs_slot);
+            emit_load_arg0(&cg->code,lhs_slot);
+            emit_load_arg1(&cg->code,rhs_slot);
             cg_call_extern(cg,g_fn_str_concat);
             cg->scope->next_offset-=16; return;
         }
@@ -2345,8 +2405,8 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
     /* ── ** power: integer exponentiation via omni_int_pow ── */
     /* rax=base (lhs), rcx=exp (rhs) — both integer registers at do_op */
     else if(strcmp(op,"**")==0){
-        emit_mov_rdx_rcx(&cg->code);  /* rdx = exp  */
-        emit_mov_rcx_rax(&cg->code);  /* rcx = base */
+        emit_mov_arg1_rcx(&cg->code); /* arg1 = exp  */
+        emit_mov_arg0_rax(&cg->code); /* arg0 = base */
         cg_call_extern(cg,g_fn_int_pow);
     }
     /* ── augmented assignment: x += e  parsed as INFIX with op "+="  ── */
@@ -2359,8 +2419,8 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
     else if(strcmp(op,"/=")==0) emit_idiv_rcx(&cg->code);
     else if(strcmp(op,"%=")==0) emit_mod_rax_rcx(&cg->code);
     else if(strcmp(op,"**=")==0){
-        emit_mov_rdx_rcx(&cg->code);
-        emit_mov_rcx_rax(&cg->code);
+        emit_mov_arg1_rcx(&cg->code);
+        emit_mov_arg0_rax(&cg->code);
         cg_call_extern(cg,g_fn_int_pow);
     }
     else omni_error_nopos("CodeGen Error","unknown operator '%s'",op);
@@ -2412,7 +2472,14 @@ static OmniType infer_type(CodeGen*cg,AST_Expression*expr){
                    strcmp(ma->member,"version")==0||strcmp(ma->member,"omni_ver")==0||
                    strcmp(ma->member,"read")==0||strcmp(ma->member,"getenv")==0||
                    strcmp(ma->member,"concat")==0||strcmp(ma->member,"slice")==0||
-                   strcmp(ma->member,"fromint")==0)return OMNI_TYPE_STR;
+                   strcmp(ma->member,"fromint")==0||strcmp(ma->member,"fromfloat")==0||
+                   strcmp(ma->member,"upper")==0||strcmp(ma->member,"lower")==0||
+                   strcmp(ma->member,"trim")==0||strcmp(ma->member,"lstrip")==0||
+                   strcmp(ma->member,"rstrip")==0||strcmp(ma->member,"strip")==0||
+                   strcmp(ma->member,"reverse")==0||strcmp(ma->member,"replace")==0||
+                   strcmp(ma->member,"repeat")==0||strcmp(ma->member,"pad_left")==0||
+                   strcmp(ma->member,"pad_right")==0||strcmp(ma->member,"to_upper_first")==0||
+                   strcmp(ma->member,"to_lower_first")==0||strcmp(ma->member,"input")==0) return OMNI_TYPE_STR;
                 // math functions that return float
                 if(strcmp(ma->member,"sqrt")==0||strcmp(ma->member,"pow")==0||
                    strcmp(ma->member,"floor")==0||strcmp(ma->member,"ceil")==0||
@@ -2441,10 +2508,20 @@ static OmniType infer_type(CodeGen*cg,AST_Expression*expr){
 // ============================================================
 //  BUILTIN CALL CODEGEN
 // ============================================================
+/* Convert the value in RAX to a double in XMM0, honoring the argument's
+   static type. FLOAT-typed values already hold raw double bits in RAX
+   (float literals are materialized as 64-bit patterns) — a MOVQ copy is
+   correct and CVTSI2SD would corrupt them (treats the bits as an integer).
+   INT/BOOL values need true numeric conversion via CVTSI2SD. */
+static void emit_to_double_arg(CodeGen*cg,AST_Expression*arg){
+    OmniType t=infer_type(cg,arg);
+    if(t==OMNI_TYPE_FLOAT) emit_rax_to_xmm0(&cg->code);  /* MOVQ xmm0,rax — bit-copy double */
+    else                   emit_int_to_float(&cg->code); /* CVTSI2SD xmm0,rax — numeric convert */
+}
 static void cg_call_print(CodeGen*cg,AST_Expression_Call*node){
     if(node->argument_count!=1){fprintf(stderr,"CodeGen Error: print() takes 1 argument\n");exit(1);}
     AST_Expression*arg=node->arguments[0];
-    cg_expr(cg,arg);emit_mov_rcx_rax(&cg->code);
+    cg_expr(cg,arg);emit_mov_arg0_rax(&cg->code);  /* ABI arg0 (RCX on Win64, RDI on SysV) */
     void*fn=g_fn_print_int;
     OmniType t=infer_type(cg,arg);
     if(t==OMNI_TYPE_STR) fn=g_fn_print_str;
@@ -2454,20 +2531,20 @@ static void cg_call_print(CodeGen*cg,AST_Expression_Call*node){
     cg_call_extern(cg,fn);
 }
 static void cg_call_input(CodeGen*cg,AST_Expression_Call*node){
-    if(node->argument_count==1){cg_expr(cg,node->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_print_str_nol);}
+    if(node->argument_count==1){cg_expr(cg,node->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_print_str_nol);}
     cg_call_extern(cg,g_fn_input);
 }
 static void cg_call_len(CodeGen*cg,AST_Expression_Call*node){
     if(node->argument_count!=1){fprintf(stderr,"CodeGen Error: len() takes 1 argument\n");exit(1);}
     cg_expr(cg,node->arguments[0]);
     OmniType t=infer_type(cg,node->arguments[0]);
-    emit_mov_rcx_rax(&cg->code);
+    emit_mov_arg0_rax(&cg->code);
     if(t==OMNI_TYPE_LIST) cg_call_extern(cg,g_fn_list_len);
     else cg_call_extern(cg,g_fn_len_str);
 }
 static void cg_call_int(CodeGen*cg,AST_Expression_Call*node){
     if(node->argument_count!=1){fprintf(stderr,"CodeGen Error: int() takes 1 argument\n");exit(1);}
-    cg_expr(cg,node->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_str_to_int);
+    cg_expr(cg,node->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_str_to_int);
 }
 static void cg_call_str(CodeGen*cg,AST_Expression_Call*node){
     if(node->argument_count!=1){fprintf(stderr,"CodeGen Error: str() takes 1 argument\n");exit(1);}
@@ -2475,7 +2552,7 @@ static void cg_call_str(CodeGen*cg,AST_Expression_Call*node){
     cg_expr(cg,node->arguments[0]);
     /* str(x): if already a string, pass through unchanged (RAX already = char* ptr) */
     if(t==OMNI_TYPE_STR||t==OMNI_TYPE_UNKNOWN) return;  /* already a string pointer */
-    emit_mov_rcx_rax(&cg->code);
+    emit_mov_arg0_rax(&cg->code);
     if(t==OMNI_TYPE_FLOAT) cg_call_extern(cg,g_fn_float_to_str);
     else                   cg_call_extern(cg,g_fn_int_to_str);  /* int, bool */
 }
@@ -2485,9 +2562,9 @@ static void cg_call_range(CodeGen*cg,AST_Expression_Call*node){
 }
 static void cg_call_assert(CodeGen*cg,AST_Expression_Call*node){
     if(node->argument_count<1){fprintf(stderr,"CodeGen Error: assert() needs 1+ args\n");exit(1);}
-    cg_expr(cg,node->arguments[0]);emit_mov_rcx_rax(&cg->code);
-    if(node->argument_count>=2){cg_expr(cg,node->arguments[1]);emit_mov_rdx_rax(&cg->code);}
-    else{emit_mov_rdx_imm64(&cg->code,(int64_t)(uintptr_t)"assertion failed");}
+    cg_expr(cg,node->arguments[0]);emit_mov_arg0_rax(&cg->code);
+    if(node->argument_count>=2){cg_expr(cg,node->arguments[1]);emit_mov_arg1_rax(&cg->code);}
+    else{emit_mov_arg1_imm64(&cg->code,(int64_t)(uintptr_t)"assertion failed");}
     cg_call_extern(cg,g_fn_assert);
 }
 
@@ -2534,7 +2611,12 @@ static int pkg_is_loaded(const char* name) {
 }
 
 // Build site-packages path for a package
+//   Windows: %LOCALAPPDATA%\Programs\omnikarai\site-packages\<name>
+//            (falls back to %USERPROFILE%\AppData\Local\...)
+//   POSIX:   $XDG_DATA_HOME/omnikarai/site-packages/<name>
+//            (falls back to ~/.local/share/omnikarai/site-packages/)
 static void pkg_site_path(const char* name, char* out, int outlen) {
+#if defined(_WIN32)
     const char* lad = getenv("LOCALAPPDATA");
     if (lad && lad[0])
         snprintf(out, outlen, "%s\\Programs\\omnikarai\\site-packages\\%s", lad, name);
@@ -2543,6 +2625,16 @@ static void pkg_site_path(const char* name, char* out, int outlen) {
         if (!home) home = "C:\\Users\\Default";
         snprintf(out, outlen, "%s\\AppData\\Local\\Programs\\omnikarai\\site-packages\\%s", home, name);
     }
+#else
+    const char* xdg = getenv("XDG_DATA_HOME");
+    const char* home = getenv("HOME");
+    if (xdg && xdg[0])
+        snprintf(out, outlen, "%s/omnikarai/site-packages/%s", xdg, name);
+    else if (home && home[0])
+        snprintf(out, outlen, "%s/.local/share/omnikarai/site-packages/%s", home, name);
+    else
+        out[0] = '\0';
+#endif
 }
 
 // Rename all fn definitions in an AST to have pkg__ prefix
@@ -2577,7 +2669,7 @@ static int pkg_load_into_cg(CodeGen* cg, const char* pkg_name) {
 
     // Collect all .ok files
     char search[1100];
-    snprintf(search, sizeof(search), "%s\\*.ok", pkg_dir);
+    snprintf(search, sizeof(search), "%s%c*.ok", pkg_dir, OMNI_PATH_SEP);
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(search, &fd);
     if (h == INVALID_HANDLE_VALUE) {
@@ -2596,7 +2688,7 @@ static int pkg_load_into_cg(CodeGen* cg, const char* pkg_name) {
         if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
 
         char filepath[1200];
-        snprintf(filepath, sizeof(filepath), "%s\\%s", pkg_dir, fd.cFileName);
+        snprintf(filepath, sizeof(filepath), "%s%c%s", pkg_dir, OMNI_PATH_SEP, fd.cFileName);
 
         // Read file
         HANDLE fh = CreateFileA(filepath, GENERIC_READ, FILE_SHARE_READ,
@@ -2660,11 +2752,11 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
 
     if(strcmp(ns,"time")==0){
         if((strcmp(method,"now")==0||strcmp(method,"clock")==0)&&argc==0){cg_call_extern(cg,g_fn_time_now);return;}
-        if(strcmp(method,"ms")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_time_ms);return;}
-        if(strcmp(method,"us")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_time_us);return;}
-        if(strcmp(method,"ns")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_time_ns);return;}
-        if(strcmp(method,"sleep")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_time_sleep);emit_xor_rax_rax(&cg->code);return;}
-        if(strcmp(method,"format")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_time_format);return;}
+        if(strcmp(method,"ms")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_time_ms);return;}
+        if(strcmp(method,"us")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_time_us);return;}
+        if(strcmp(method,"ns")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_time_ns);return;}
+        if(strcmp(method,"sleep")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_time_sleep);emit_xor_rax_rax(&cg->code);return;}
+        if(strcmp(method,"format")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_time_format);return;}
         fprintf(stderr,"CodeGen Error: unknown time.%s()\n",method);exit(1);
     }
 
@@ -2672,9 +2764,9 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         if(strcmp(method,"now")==0&&argc==0){cg_call_extern(cg,g_fn_dt_now);return;}
         if(strcmp(method,"utcnow")==0&&argc==0){cg_call_extern(cg,g_fn_dt_utcnow);return;}
         if(strcmp(method,"timezone")==0&&argc==0){cg_call_extern(cg,g_fn_dt_timezone);return;}
-        #define DT_1ARG(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,fn);return;}
+        #define DT_1ARG(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,fn);return;}
         // 0-arg versions auto-use datetime.now()
-        #define DT_0ARG(meth,fn) if(strcmp(method,meth)==0&&argc==0){cg_call_extern(cg,g_fn_dt_now);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,fn);return;}
+        #define DT_0ARG(meth,fn) if(strcmp(method,meth)==0&&argc==0){cg_call_extern(cg,g_fn_dt_now);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,fn);return;}
         DT_0ARG("year",        g_fn_dt_year)
         DT_0ARG("month",       g_fn_dt_month)
         DT_0ARG("day",         g_fn_dt_day)
@@ -2704,12 +2796,12 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         if(strcmp(method,"diff_ms")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_dt_diff_ms);cg->scope->next_offset-=8;return;}
         if(strcmp(method,"diff_s")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_dt_diff_s);cg->scope->next_offset-=8;return;}
         // FIX: datetime.make(year,month,day) — clean 3-slot pattern with correct R8 load
         if(strcmp(method,"make")==0&&argc==3){
@@ -2720,7 +2812,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_dt_make);
             cg->scope->next_offset-=24;return;}
         fprintf(stderr,"CodeGen Error: unknown datetime.%s()\n",method);exit(1);
@@ -2730,21 +2822,21 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         if(strcmp(method,"pi")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_PI,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);return;}
         if(strcmp(method,"e")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_E,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);return;}
         if(strcmp(method,"tau")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_TAU,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);return;}
-        if(strcmp(method,"abs")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_math_abs);return;}
+        if(strcmp(method,"abs")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_math_abs);return;}
         if(strcmp(method,"min")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_math_min);cg->scope->next_offset-=8;return;}
         if(strcmp(method,"max")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_math_max);cg->scope->next_offset-=8;return;}
         if(strcmp(method,"gcd")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_math_gcd);cg->scope->next_offset-=8;return;}
         // FIX: math.clamp(v,lo,hi) — clean 3-slot pattern with correct R8 load
         if(strcmp(method,"clamp")==0&&argc==3){
@@ -2755,16 +2847,17 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_math_clamp);
             cg->scope->next_offset-=24;return;}
         /* MATH_1F: float-returning 1-arg math functions.
-           Windows x64 ABI: floats/doubles are passed in XMM0 and returned in XMM0.
-           We convert the integer in RAX to double in XMM0 before the call,
-           then move the result XMM0→RAX so the rest of codegen sees the value. */
+           Both Win64 and SysV pass/return doubles in XMM0.
+           The arg is converted to double in XMM0 per its static type
+           (see emit_to_double_arg — CVTSI2SD only for ints, else MOVQ).
+           Result moves XMM0→RAX so the rest of codegen sees the value. */
         #define MATH_1F(meth,fn) if(strcmp(method,meth)==0&&argc==1){\
             cg_expr(cg,call->arguments[0]);\
-            emit_int_to_float(&cg->code); /* CVTSI2SD xmm0,rax: int64→double */\
+            emit_to_double_arg(cg,call->arguments[0]);\
             cg_call_extern(cg,fn);\
             emit_xmm0_to_rax(&cg->code);  /* MOVQ rax,xmm0: double result→RAX */\
             return;}
@@ -2788,12 +2881,12 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         if(strcmp(method,"ftoi")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_rax_to_xmm0(&cg->code);emit_float_to_int(&cg->code);return;} /* direct CVTTSD2SI, no call */
         #undef MATH_1F
         if(strcmp(method,"atan2")==0&&argc==2){
-            /* atan2(y,x): pass y→XMM0, x→XMM1 (Windows x64 float ABI) */
+            /* atan2(y,x): pass y→XMM0, x→XMM1 (float args in XMM regs, both ABIs) */
             int s0=cg->scope->next_offset;cg->scope->next_offset+=8;
             int s1=cg->scope->next_offset;cg->scope->next_offset+=8;
             if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
-            cg_expr(cg,call->arguments[0]);emit_int_to_float(&cg->code);emit_store_xmm0(&cg->code,s0);
-            cg_expr(cg,call->arguments[1]);emit_int_to_float(&cg->code);emit_store_xmm0(&cg->code,s1);
+            cg_expr(cg,call->arguments[0]);emit_to_double_arg(cg,call->arguments[0]);emit_store_xmm0(&cg->code,s0);
+            cg_expr(cg,call->arguments[1]);emit_to_double_arg(cg,call->arguments[1]);emit_store_xmm0(&cg->code,s1);
             emit_load_xmm0(&cg->code,s0);emit_load_xmm1(&cg->code,s1);
             cg_call_extern(cg,g_fn_math_atan2);emit_xmm0_to_rax(&cg->code);
             cg->scope->next_offset-=16;return;}
@@ -2802,8 +2895,8 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             int s0=cg->scope->next_offset;cg->scope->next_offset+=8;
             int s1=cg->scope->next_offset;cg->scope->next_offset+=8;
             if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
-            cg_expr(cg,call->arguments[0]);emit_int_to_float(&cg->code);emit_store_xmm0(&cg->code,s0);
-            cg_expr(cg,call->arguments[1]);emit_int_to_float(&cg->code);emit_store_xmm0(&cg->code,s1);
+            cg_expr(cg,call->arguments[0]);emit_to_double_arg(cg,call->arguments[0]);emit_store_xmm0(&cg->code,s0);
+            cg_expr(cg,call->arguments[1]);emit_to_double_arg(cg,call->arguments[1]);emit_store_xmm0(&cg->code,s1);
             emit_load_xmm0(&cg->code,s0);emit_load_xmm1(&cg->code,s1);
             cg_call_extern(cg,g_fn_math_pow);emit_xmm0_to_rax(&cg->code);
             cg->scope->next_offset-=16;return;}
@@ -2811,16 +2904,16 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
     }
 
     if(strcmp(ns,"os")==0){
-        if(strcmp(method,"exit")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_os_exit);return;}
-        if(strcmp(method,"exit")==0&&argc==0){emit_mov_rcx_imm64(&cg->code,0);cg_call_extern(cg,g_fn_os_exit);return;}
+        if(strcmp(method,"exit")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_os_exit);return;}
+        if(strcmp(method,"exit")==0&&argc==0){emit_mov_arg0_imm64(&cg->code,0);cg_call_extern(cg,g_fn_os_exit);return;}
         if(strcmp(method,"platform")==0&&argc==0){cg_call_extern(cg,g_fn_os_platform);return;}
         if(strcmp(method,"cwd")==0&&argc==0){cg_call_extern(cg,g_fn_os_cwd);return;}
         if(strcmp(method,"getpid")==0&&argc==0){cg_call_extern(cg,g_fn_os_getpid);return;}
-        if(strcmp(method,"getenv")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_os_getenv);return;}
-        if(strcmp(method,"exists")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_os_exists);return;}
-        if(strcmp(method,"mkdir")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_os_mkdir);return;}
+        if(strcmp(method,"getenv")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_os_getenv);return;}
+        if(strcmp(method,"exists")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_os_exists);return;}
+        if(strcmp(method,"mkdir")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_os_mkdir);return;}
         /* os extended — 1 arg */
-        #define OS_1(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,fn);return;}
+        #define OS_1(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,fn);return;}
         OS_1("remove",   g_fn_os_remove)
         OS_1("isfile",   g_fn_os_isfile)
         OS_1("isdir",    g_fn_os_isdir)
@@ -2832,7 +2925,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         #define OS_2(meth,fn) if(strcmp(method,meth)==0&&argc==2){\
             int _s=cg->scope->next_offset;cg->scope->next_offset+=8;if(_s>cg->stack_size)cg->stack_size=_s;\
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,_s);\
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,_s);\
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,_s);\
             cg_call_extern(cg,fn);cg->scope->next_offset-=8;return;}
         OS_2("rename", g_fn_os_rename)
         OS_2("join",   g_fn_os_join)
@@ -2841,36 +2934,36 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
     }
 
     if(strcmp(ns,"io")==0){
-        if(strcmp(method,"read")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_io_read);return;}
-        if(strcmp(method,"exists")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_io_exists);return;}
-        if(strcmp(method,"delete")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_io_delete);return;}
-        if(strcmp(method,"size")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_io_size);return;}
+        if(strcmp(method,"read")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_io_read);return;}
+        if(strcmp(method,"exists")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_io_exists);return;}
+        if(strcmp(method,"delete")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_io_delete);return;}
+        if(strcmp(method,"size")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_io_size);return;}
         if(strcmp(method,"write")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_io_write);cg->scope->next_offset-=8;return;}
         if(strcmp(method,"append")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_io_append);cg->scope->next_offset-=8;return;}
         /* io extended */
         if(strcmp(method,"copy")==0&&argc==2){
             int _s=cg->scope->next_offset;cg->scope->next_offset+=8;if(_s>cg->stack_size)cg->stack_size=_s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,_s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,_s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,_s);
             cg_call_extern(cg,g_fn_io_copy);cg->scope->next_offset-=8;return;}
         if(strcmp(method,"rename")==0&&argc==2){
             int _s=cg->scope->next_offset;cg->scope->next_offset+=8;if(_s>cg->stack_size)cg->stack_size=_s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,_s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,_s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,_s);
             cg_call_extern(cg,g_fn_io_rename);cg->scope->next_offset-=8;return;}
-        if(strcmp(method,"line_count")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_io_line_count);return;}
+        if(strcmp(method,"line_count")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_io_line_count);return;}
         if(strcmp(method,"readline")==0&&argc==2){
             int _s=cg->scope->next_offset;cg->scope->next_offset+=8;if(_s>cg->stack_size)cg->stack_size=_s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,_s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,_s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,_s);
             cg_call_extern(cg,g_fn_io_readline);cg->scope->next_offset-=8;return;}
         fprintf(stderr,"CodeGen Error: unknown io.%s()\n",method);exit(1);
     }
@@ -2881,8 +2974,8 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         if(strcmp(method,"arch")==0)     {cg_call_extern(cg,g_fn_sys_arch);return;}
         if(strcmp(method,"omni_ver")==0) {cg_call_extern(cg,g_fn_sys_omni_ver);return;}
         if(strcmp(method,"bits")==0)     {cg_call_extern(cg,g_fn_sys_bits);return;}
-        if(strcmp(method,"exit")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_sys_exit_fn);return;}
-        if(strcmp(method,"exit")==0&&argc==0){emit_mov_rcx_imm64(&cg->code,0);cg_call_extern(cg,g_fn_sys_exit_fn);return;}
+        if(strcmp(method,"exit")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_sys_exit_fn);return;}
+        if(strcmp(method,"exit")==0&&argc==0){emit_mov_arg0_imm64(&cg->code,0);cg_call_extern(cg,g_fn_sys_exit_fn);return;}
         if(strcmp(method,"input")==0&&argc==0){cg_call_extern(cg,g_fn_sys_input_fn);return;}
         if(strcmp(method,"memory")==0&&argc==0){cg_call_extern(cg,g_fn_sys_memory);return;}
         fprintf(stderr,"CodeGen Error: unknown sys.%s()\n",method);exit(1);
@@ -2890,19 +2983,19 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
 
     if(strcmp(ns,"list")==0){
         if(strcmp(method,"new")==0&&argc==0){cg_call_extern(cg,g_fn_list_new);return;}
-        if(strcmp(method,"len")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_list_len);return;}
-        if(strcmp(method,"pop")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_list_pop);return;}
-        if(strcmp(method,"free")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_list_free);emit_xor_rax_rax(&cg->code);return;}
+        if(strcmp(method,"len")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_list_len);return;}
+        if(strcmp(method,"pop")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_list_pop);return;}
+        if(strcmp(method,"free")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_list_free);emit_xor_rax_rax(&cg->code);return;}
         if(strcmp(method,"contains")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_list_contains);cg->scope->next_offset-=8;return;}
         if(strcmp(method,"push")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);
-            emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);
+            emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_list_push);
             if(call->arguments[0]&&call->arguments[0]->type==IDENTIFIER){
                 const char*lst_var=((AST_Expression_Identifier*)call->arguments[0])->value;
@@ -2914,7 +3007,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         if(strcmp(method,"get")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_list_get);cg->scope->next_offset-=8;return;}
         // FIX: list.set(lst,idx,val) — clean 3-slot pattern with correct R8 load
         if(strcmp(method,"set")==0&&argc==3){
@@ -2925,12 +3018,12 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_list_set);emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=24;return;}
-        if(strcmp(method,"print")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_list_print);return;}
+        if(strcmp(method,"print")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_list_print);return;}
         /* list extended — 1 arg */
-        #define LIST_1(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,fn);return;}
+        #define LIST_1(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,fn);return;}
         LIST_1("reverse", g_fn_list_reverse)
         LIST_1("sort",    g_fn_list_sort)
         LIST_1("clear",   g_fn_list_clear)
@@ -2943,7 +3036,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         #define LIST_2(meth,fn) if(strcmp(method,meth)==0&&argc==2){\
             int _s=cg->scope->next_offset;cg->scope->next_offset+=8;if(_s>cg->stack_size)cg->stack_size=_s;\
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,_s);\
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,_s);\
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,_s);\
             cg_call_extern(cg,fn);cg->scope->next_offset-=8;return;}
         LIST_2("index",   g_fn_list_index)
         LIST_2("remove",  g_fn_list_remove_v)
@@ -2958,7 +3051,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_list_insert);
             /* update variable pointer like push does */
             if(call->arguments[0]&&call->arguments[0]->type==IDENTIFIER){
@@ -2974,14 +3067,14 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         if(strcmp(method,"eq")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_str_eq);cg->scope->next_offset-=8;return;}
         if(strcmp(method,"concat")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_str_concat);cg->scope->next_offset-=8;return;}
-        if(strcmp(method,"len")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_len_str);return;}
+        if(strcmp(method,"len")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_len_str);return;}
         if(strcmp(method,"slice")==0&&argc==3){
             int s0=cg->scope->next_offset;cg->scope->next_offset+=8;
             int s1=cg->scope->next_offset;cg->scope->next_offset+=8;
@@ -2990,12 +3083,12 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_str_slice);cg->scope->next_offset-=24;return;}
-        if(strcmp(method,"toint")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_str_to_int);return;}
-        if(strcmp(method,"fromint")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_int_to_str);return;}
+        if(strcmp(method,"toint")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_str_to_int);return;}
+        if(strcmp(method,"fromint")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_int_to_str);return;}
         /* str extended — 0/1 arg */
-        #define STR_1(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,fn);return;}
+        #define STR_1(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,fn);return;}
         STR_1("upper",    g_fn_str_upper)
         STR_1("lower",    g_fn_str_lower)
         STR_1("trim",     g_fn_str_trim)
@@ -3007,7 +3100,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         #define STR_2(meth,fn) if(strcmp(method,meth)==0&&argc==2){\
             int _s=cg->scope->next_offset;cg->scope->next_offset+=8;if(_s>cg->stack_size)cg->stack_size=_s;\
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,_s);\
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,_s);\
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,_s);\
             cg_call_extern(cg,fn);cg->scope->next_offset-=8;return;}
         STR_2("contains",   g_fn_str_contains)
         STR_2("starts_with",g_fn_str_starts)
@@ -3027,7 +3120,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_str_replace);
             cg->scope->next_offset-=24;return;}
         fprintf(stderr,"CodeGen Error: unknown str.%s()\n",method);exit(1);
@@ -3040,7 +3133,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         // 0-arg
         if(strcmp(method,"bench_start")==0&&argc==0){cg_call_extern(cg,g_fn_ai_bench_start);return;}
         // 1-arg
-        #define AI_1(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,fn);return;}
+        #define AI_1(meth,fn) if(strcmp(method,meth)==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,fn);return;}
         AI_1("free",        g_fn_ai_free)
         AI_1("alloc",       g_fn_ai_alloc)
         AI_1("relu",        g_fn_ai_relu)   // ai.relu(arr_ptr_and_n_packed) — use 2-arg form below
@@ -3048,17 +3141,17 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         #undef AI_1
         // alloc(n) — 1 arg: number of floats, 64-byte aligned
         if(strcmp(method,"alloc")==0&&argc==1){
-            cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);
+            cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);
             cg_call_extern(cg,g_fn_ai_alloc);return;}
         // free(ptr)
         if(strcmp(method,"free")==0&&argc==1){
-            cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);
+            cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);
             cg_call_extern(cg,g_fn_ai_free);emit_xor_rax_rax(&cg->code);return;}
         // get(arr,idx) -> float bits as int64
         if(strcmp(method,"get")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_ai_get);cg->scope->next_offset-=8;return;}
         // set(arr,idx,val)
         if(strcmp(method,"set")==0&&argc==3){
@@ -3069,7 +3162,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_ai_set);emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=24;return;}
         // fill(arr,val,n)
@@ -3081,21 +3174,21 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_ai_fill);emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=24;return;}
         // relu(arr,n)
         if(strcmp(method,"relu")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_ai_relu);emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=8;return;}
         // softmax(arr,n)
         if(strcmp(method,"softmax")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_ai_softmax);emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=8;return;}
         // layernorm(arr,n,eps_bits)
@@ -3107,7 +3200,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_ai_layernorm);emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=24;return;}
         // dot(a,b,n) -> float bits
@@ -3119,7 +3212,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_ai_dot);
             cg->scope->next_offset-=24;return;}
         // dot_i8(a,b,n) -> INT8 quantized dot product (VPMADDUBSW, 32 ops/cycle)
@@ -3131,7 +3224,7 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s0);
             cg_expr(cg,call->arguments[1]);emit_store_rax(&cg->code,s1);
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2);
-            emit_load_rcx(&cg->code,s0);emit_load_rdx(&cg->code,s1);emit_load_r8(&cg->code,s2);
+            emit_load_arg0(&cg->code,s0);emit_load_arg1(&cg->code,s1);emit_load_arg2(&cg->code,s2);
             cg_call_extern(cg,g_fn_ai_dot_i8);
             cg->scope->next_offset-=24;return;}
         // matmul(A,x,y,rows,cols) — 5-arg Windows x64 call
@@ -3150,18 +3243,23 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             cg_expr(cg,call->arguments[2]);emit_store_rax(&cg->code,s2); // y
             cg_expr(cg,call->arguments[3]);emit_store_rax(&cg->code,s3); // rows
             cg_expr(cg,call->arguments[4]);emit_store_rax(&cg->code,s4); // cols
-            // Load register args
+            // Load register args (per-ABI, see include/abi.h)
+#if defined(OMNI_ABI_WIN64)
             emit_load_rcx(&cg->code,s0); // RCX = A
             emit_load_rdx(&cg->code,s1); // RDX = x
             emit_load_r8 (&cg->code,s2); // R8  = y
             emit_load_r9 (&cg->code,s3); // R9  = rows
             // 5th arg (cols): Windows x64 ABI requires it at [rsp+32].
-            // rsp = rbp - aligned_frame(stack_size). s4 >= stack_size so
-            // s4 > aligned_frame-32 meaning [rbp-s4] is safely below [rsp+32].
-            // We write via rsp+32 which is the correct ABI slot.
             emit_load_rax(&cg->code,s4);
             emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x44);
             emit_u8(&cg->code,0x24);emit_u8(&cg->code,0x20); // mov [rsp+32], rax
+#else
+            emit_load_arg0(&cg->code,s0); // RDI = A
+            emit_load_arg1(&cg->code,s1); // RSI = x
+            emit_load_arg2(&cg->code,s2); // RDX = y
+            emit_load_arg3(&cg->code,s3); // RCX = rows
+            emit_load_arg4(&cg->code,s4); // R8  = cols
+#endif
             cg_call_extern(cg,g_fn_matvec);
             emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=40;return;}
@@ -3169,12 +3267,12 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
         if(strcmp(method,"print")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
             cg_expr(cg,call->arguments[0]);emit_store_rax(&cg->code,s);
-            cg_expr(cg,call->arguments[1]);emit_mov_rdx_rax(&cg->code);emit_load_rcx(&cg->code,s);
+            cg_expr(cg,call->arguments[1]);emit_mov_arg1_rax(&cg->code);emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_ai_print);emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=8;return;}
         // bench_end_us(t0) -> microseconds elapsed
         if(strcmp(method,"bench_end_us")==0&&argc==1){
-            cg_expr(cg,call->arguments[0]);emit_mov_rcx_rax(&cg->code);
+            cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);
             cg_call_extern(cg,g_fn_ai_bench_us);return;}
         // matmul_nn(C, A, B, M, K, N) — 6-arg matrix-matrix multiply
         if(strcmp(method,"matmul_nn")==0&&argc==6){
@@ -3182,16 +3280,20 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             for(int ai2=0;ai2<6;ai2++){slots[ai2]=base+ai2*8;cg->scope->next_offset+=8;}
             if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
             for(int ai2=0;ai2<6;ai2++){cg_expr(cg,call->arguments[ai2]);emit_store_rax(&cg->code,slots[ai2]);}
-            emit_load_rcx(&cg->code,slots[0]); // C
-            emit_load_rdx(&cg->code,slots[1]); // A
-            emit_load_r8 (&cg->code,slots[2]); // B
-            emit_load_r9 (&cg->code,slots[3]); // M
-            // 5th arg (K): [rsp+32]
+            emit_load_arg0(&cg->code,slots[0]); // C
+            emit_load_arg1(&cg->code,slots[1]); // A
+            emit_load_arg2(&cg->code,slots[2]); // B
+            emit_load_arg3(&cg->code,slots[3]); // M
+#if defined(OMNI_ABI_WIN64)
+            // 5th arg (K): [rsp+32]; 6th arg (N): [rsp+40]
             emit_load_rax(&cg->code,slots[4]);
             emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x44);emit_u8(&cg->code,0x24);emit_u8(&cg->code,0x20);
-            // 6th arg (N): [rsp+40]
             emit_load_rax(&cg->code,slots[5]);
             emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x44);emit_u8(&cg->code,0x24);emit_u8(&cg->code,0x28);
+#else
+            emit_load_arg4(&cg->code,slots[4]); // R8  = K
+            emit_load_arg5(&cg->code,slots[5]); // R9  = N
+#endif
             cg_call_extern(cg,g_fn_matmul_nn);
             emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=48;return;}
@@ -3201,15 +3303,25 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             for(int ai2=0;ai2<8;ai2++){slots[ai2]=base+ai2*8;cg->scope->next_offset+=8;}
             if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
             for(int ai2=0;ai2<8;ai2++){cg_expr(cg,call->arguments[ai2]);emit_store_rax(&cg->code,slots[ai2]);}
-            emit_load_rcx(&cg->code,slots[0]); // C
-            emit_load_rdx(&cg->code,slots[1]); // A
-            emit_load_r8 (&cg->code,slots[2]); // B
-            emit_load_r9 (&cg->code,slots[3]); // M
+            emit_load_arg0(&cg->code,slots[0]); // C
+            emit_load_arg1(&cg->code,slots[1]); // A
+            emit_load_arg2(&cg->code,slots[2]); // B
+            emit_load_arg3(&cg->code,slots[3]); // M
+#if defined(OMNI_ABI_WIN64)
             // Args 5-8 on stack: [rsp+32], [rsp+40], [rsp+48], [rsp+56]
             for(int si=4;si<8;si++){
                 emit_load_rax(&cg->code,slots[si]);
                 emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x44);emit_u8(&cg->code,0x24);emit_u8(&cg->code,(uint8_t)(0x20+(si-4)*8));
             }
+#else
+            // SysV: args 5-6 in R8/R9, args 7-8 on stack at [rsp+0]/[rsp+8]
+            emit_load_arg4(&cg->code,slots[4]); // R8  = K
+            emit_load_arg5(&cg->code,slots[5]); // R9  = N
+            for(int si=6;si<8;si++){
+                emit_load_rax(&cg->code,slots[si]);
+                emit_stack_arg_sysv(&cg->code,si-6);
+            }
+#endif
             cg_call_extern(cg,g_fn_gemm);
             emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=64;return;}
@@ -3254,10 +3366,10 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
                 cg_expr(cg, call->arguments[_i]);
                 emit_store_rax(&cg->code, arg_offsets[_i]);
             }
-            if (argc >= 1) emit_load_rcx(&cg->code, arg_offsets[0]);
-            if (argc >= 2) emit_load_rdx(&cg->code, arg_offsets[1]);
-            if (argc >= 3) emit_load_r8 (&cg->code, arg_offsets[2]);
-            if (argc >= 4) emit_load_r9 (&cg->code, arg_offsets[3]);
+            if (argc >= 1) emit_load_arg0(&cg->code,arg_offsets[0]);
+            if (argc >= 2) emit_load_arg1(&cg->code,arg_offsets[1]);
+            if (argc >= 3) emit_load_arg2(&cg->code,arg_offsets[2]);
+            if (argc >= 4) emit_load_arg3(&cg->code,arg_offsets[3]);
             cg->scope->next_offset = saved_off;
             emit_u8(&cg->code, 0xE8);
             size_t pp = cg->code.size; emit_u32(&cg->code, 0);
@@ -3292,7 +3404,7 @@ static void cg_call_user(CodeGen*cg,AST_Expression_Call*node,const char*fn_name)
         // Actually alloc 32 fields max per instance — 16 bytes each
         int inst_slot=cg->scope->next_offset;cg->scope->next_offset+=8;
         if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
-        emit_mov_rcx_imm64(&cg->code,MAX_FIELDS); // alloc MAX_FIELDS slots
+        emit_mov_arg0_imm64(&cg->code,MAX_FIELDS); // alloc MAX_FIELDS slots
         cg_call_extern(cg,g_fn_class_alloc);
         emit_store_rax(&cg->code,inst_slot); // save instance ptr
         // 2. Call ClassName_init(instance_ptr, arg0, arg1, ...)
@@ -3312,10 +3424,10 @@ static void cg_call_user(CodeGen*cg,AST_Expression_Call*node,const char*fn_name)
             emit_load_rax(&cg->code,inst_slot);emit_store_rax(&cg->code,slots[0]);
             // Remaining args
             for(int i=0;i<argc;i++){cg_expr(cg,node->arguments[i]);emit_store_rax(&cg->code,slots[i+1]);}
-            if(total>=1)emit_load_rcx(&cg->code,slots[0]);
-            if(total>=2)emit_load_rdx(&cg->code,slots[1]);
-            if(total>=3)emit_load_r8(&cg->code,slots[2]);
-            if(total>=4)emit_load_r9(&cg->code,slots[3]);
+            if(total>=1)emit_load_arg0(&cg->code,slots[0]);
+            if(total>=2)emit_load_arg1(&cg->code,slots[1]);
+            if(total>=3)emit_load_arg2(&cg->code,slots[2]);
+            if(total>=4)emit_load_arg3(&cg->code,slots[3]);
             cg->scope->next_offset=base;
             emit_u8(&cg->code,0xE8);size_t pp=cg->code.size;emit_u32(&cg->code,0);
             if(cg->call_patch_count>=MAX_CALL_PATCHES){fprintf(stderr,"Fatal: too many call patches\n");exit(1);}
@@ -3349,10 +3461,10 @@ static void cg_call_user(CodeGen*cg,AST_Expression_Call*node,const char*fn_name)
         emit_store_rax(&cg->code,arg_offsets[i]);
     }
     // Load into ABI registers
-    if(argc>=1)emit_load_rcx(&cg->code,arg_offsets[0]);
-    if(argc>=2)emit_load_rdx(&cg->code,arg_offsets[1]);
-    if(argc>=3)emit_load_r8(&cg->code,arg_offsets[2]);
-    if(argc>=4)emit_load_r9(&cg->code,arg_offsets[3]);
+    if(argc>=1)emit_load_arg0(&cg->code,arg_offsets[0]);
+    if(argc>=2)emit_load_arg1(&cg->code,arg_offsets[1]);
+    if(argc>=3)emit_load_arg2(&cg->code,arg_offsets[2]);
+    if(argc>=4)emit_load_arg3(&cg->code,arg_offsets[3]);
     // Restore next_offset — arg slots no longer needed after CALL
     cg->scope->next_offset=saved_off;
     emit_u8(&cg->code,0xE8); size_t patch_pos=cg->code.size; emit_u32(&cg->code,0);
@@ -3437,10 +3549,10 @@ static void cg_expr(CodeGen*cg,AST_Expression*expr){
                             cg_expr(cg,call->arguments[ai]);
                             emit_store_rax(&cg->code,slots[ai+1]);
                         }
-                        if(total_args>=1)emit_load_rcx(&cg->code,slots[0]);
-                        if(total_args>=2)emit_load_rdx(&cg->code,slots[1]);
-                        if(total_args>=3)emit_load_r8(&cg->code,slots[2]);
-                        if(total_args>=4)emit_load_r9(&cg->code,slots[3]);
+                        if(total_args>=1)emit_load_arg0(&cg->code,slots[0]);
+                        if(total_args>=2)emit_load_arg1(&cg->code,slots[1]);
+                        if(total_args>=3)emit_load_arg2(&cg->code,slots[2]);
+                        if(total_args>=4)emit_load_arg3(&cg->code,slots[3]);
                         cg->scope->next_offset=base;
                         // Emit call patch
                         emit_u8(&cg->code,0xE8);size_t pp=cg->code.size;emit_u32(&cg->code,0);
@@ -3520,7 +3632,7 @@ static void cg_expr(CodeGen*cg,AST_Expression*expr){
             /* [a, b, c]  →  list.new() + list.push() for each element */
             AST_Expression_ArrayLiteral*al=(AST_Expression_ArrayLiteral*)expr;
             /* call list.new() → RAX = list ptr */
-            emit_mov_rcx_imm64(&cg->code,0);
+            emit_mov_arg0_imm64(&cg->code,0);
             cg_call_extern(cg,g_fn_list_new);
             /* store list ptr in a temp slot */
             int lslot=cg->scope->next_offset; cg->scope->next_offset+=8;
@@ -3532,7 +3644,7 @@ static void cg_expr(CodeGen*cg,AST_Expression*expr){
                 emit_load_rcx(&cg->code,lslot);
                 /* arg2 = element value */
                 cg_expr(cg,al->elements[_i]);
-                emit_mov_rdx_rax(&cg->code);
+                emit_mov_arg1_rax(&cg->code);
                 cg_call_extern(cg,g_fn_list_push);
             }
             /* result = list ptr */
@@ -3543,21 +3655,21 @@ static void cg_expr(CodeGen*cg,AST_Expression*expr){
         case MAP_LITERAL:{
             /* {"k":v,...}  →  list.new() (flat key/value pairs) */
             AST_Expression_MapLiteral*ml=(AST_Expression_MapLiteral*)expr;
-            emit_mov_rcx_imm64(&cg->code,0);
+            emit_mov_arg0_imm64(&cg->code,0);
             cg_call_extern(cg,g_fn_list_new);
             int mslot=cg->scope->next_offset; cg->scope->next_offset+=8;
             if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
             emit_store_rax(&cg->code,mslot);
             for(int _i=0;_i<ml->entry_count;_i++){
                 /* push key */
-                emit_load_rcx(&cg->code,mslot);
+                emit_load_arg0(&cg->code,mslot);
                 cg_expr(cg,ml->entries[_i]->key);
-                emit_mov_rdx_rax(&cg->code);
+                emit_mov_arg1_rax(&cg->code);
                 cg_call_extern(cg,g_fn_list_push);
                 /* push value */
-                emit_load_rcx(&cg->code,mslot);
+                emit_load_arg0(&cg->code,mslot);
                 cg_expr(cg,ml->entries[_i]->value);
-                emit_mov_rdx_rax(&cg->code);
+                emit_mov_arg1_rax(&cg->code);
                 cg_call_extern(cg,g_fn_list_push);
             }
             emit_load_rax(&cg->code,mslot);
@@ -3572,8 +3684,8 @@ static void cg_expr(CodeGen*cg,AST_Expression*expr){
             cg_expr(cg,ix->left);
             emit_store_rax(&cg->code,lslot);
             cg_expr(cg,ix->index);
-            emit_mov_rdx_rax(&cg->code);
-            emit_load_rcx(&cg->code,lslot);
+            emit_mov_arg1_rax(&cg->code);
+            emit_load_arg0(&cg->code,lslot);
             cg_call_extern(cg,g_fn_list_get);
             cg->scope->next_offset-=8;
             break;
@@ -3921,13 +4033,16 @@ static void cg_while_statement(CodeGen*cg,AST_Statement_While*stmt){
     for(int i=1;i<nhv;i++){HotVar tmp=hv[i];int j=i-1;
         while(j>=0&&hv[j].count<tmp.count){hv[j+1]=hv[j];j--;}hv[j+1]=tmp;}
 
-    /* Step 3: pin top-5 most-read vars into RBX(slot2)/R12(slot3)/R13(slot4)/RSI(slot5)/RDI(slot6).
-       v7.0: Threshold=1 so ALL loop variables get pinned — even single-use vars
+    /* Step 3: pin most-read vars into callee-saved registers.
+       Win64: RBX(2)/R12(3)/R13(4)/RSI(5)/RDI(6) — 5 slots.
+       SysV:  RBX(2)/R12(3)/R13(4) only — RSI/RDI are caller-saved there,
+       so they must never hold loop-pinned values (OMNI_MAX_PIN).
+       Threshold=1 so ALL loop variables get pinned — even single-use vars
        in tight loops run millions of iterations where every cycle counts. */
     int base_depth=cg->reg_var_depth;
-    int save_slots[5]; int n_saved=0;
+    int save_slots[OMNI_MAX_PIN]; int n_saved=0;
 
-    for(int ri=0;ri<nhv&&n_saved<5;ri++){
+    for(int ri=0;ri<nhv&&n_saved<OMNI_MAX_PIN;ri++){
         if(hv[ri].count<1) break;
         /* skip if already pinned in any slot */
         int already=0;
@@ -3937,8 +4052,8 @@ static void cg_while_statement(CodeGen*cg,AST_Statement_While*stmt){
         /* must have a stack slot — either pre-existing or just pre-allocated */
         Symbol*sym=scope_get(cg->scope,hv[ri].name);
         if(!sym) continue;
-        int slot=2+n_saved; /* use slots 2,3,4,5,6 in order */
-        if(slot>6) break;
+        int slot=2+n_saved; /* use slots 2..(1+OMNI_MAX_PIN) in order */
+        if(slot>1+OMNI_MAX_PIN) break;
         /* check slot is free (not occupied by an outer loop) */
         if(cg->reg_var_names[slot][0]) continue;
         /* spill current register content to a fresh stack slot */
@@ -4077,7 +4192,7 @@ static void cg_for_range(CodeGen*cg,AST_Statement_For*stmt,AST_Expression_Call*r
             // Pin hottest accumulator from for-body into RBX/R12/R13
             // e.g. 'set s = s + i' — s is used every iteration and benefits from pinning
             int fbody_base=cg->reg_var_depth;
-            int fbody_saves[3]; int fbody_nsaved=0;
+            int fbody_saves[OMNI_MAX_PIN]; int fbody_nsaved=0; /* FIX(N5): was [3] while cap allowed 5 pinned vars — stack overflow on Win64 */
             {
                 HotVar fpre[HOT_MAX]; int fnpre=0;
                 prescan_set_names(stmt->body,fpre,&fnpre);
@@ -4090,7 +4205,7 @@ static void cg_for_range(CodeGen*cg,AST_Statement_For*stmt,AST_Expression_Call*r
                 count_block_reads(stmt->body,fhv,&fnhv);
                 for(int i=1;i<fnhv;i++){HotVar t=fhv[i];int j=i-1;
                     while(j>=0&&fhv[j].count<t.count){fhv[j+1]=fhv[j];j--;}fhv[j+1]=t;}
-                for(int ri=0;ri<fnhv&&fbody_nsaved<5;ri++){
+                for(int ri=0;ri<fnhv&&fbody_nsaved<OMNI_MAX_PIN;ri++){
                     if(fhv[ri].count<1) break;
                     int already=0;
                     for(int k=0;k<7;k++)
@@ -4224,7 +4339,7 @@ static void cg_for_list(CodeGen*cg,AST_Statement_For*stmt){
     emit_store_rax(&cg->code,lst_slot);
 
     /* len = list.len(lst) */
-    emit_load_rcx(&cg->code,lst_slot);
+    emit_load_arg0(&cg->code,lst_slot);
     cg_call_extern(cg,g_fn_list_len);
     emit_store_rax(&cg->code,len_slot);
 
@@ -4248,8 +4363,8 @@ static void cg_for_list(CodeGen*cg,AST_Statement_For*stmt){
     size_t jge=emit_jge_fwd(&cg->code);
 
     /* item = list.get(lst, i) */
-    emit_load_rcx(&cg->code,lst_slot);
-    emit_load_rdx(&cg->code,i_slot);
+    emit_load_arg0(&cg->code,lst_slot);
+    emit_load_arg1(&cg->code,i_slot);
     cg_call_extern(cg,g_fn_list_get);
     emit_store_rax(&cg->code,iter_sym->stack_offset);
 
@@ -4333,7 +4448,7 @@ static void cg_return_statement(CodeGen*cg,AST_Statement_Return*stmt){
 static void cg_break_statement(CodeGen*cg){if(cg->break_patch_count>=MAX_LOOP_PATCHES){fprintf(stderr,"Fatal: too many break\n");exit(1);}cg->break_patches[cg->break_patch_count++]=emit_jmp_fwd(&cg->code);}
 static void cg_continue_statement(CodeGen*cg){if(cg->continue_patch_count>=MAX_LOOP_PATCHES){fprintf(stderr,"Fatal: too many continue\n");exit(1);}cg->continue_patches[cg->continue_patch_count++]=emit_jmp_fwd(&cg->code);}
 
-static const char* g_known_modules[] = {"time","datetime","math","os","io","sys","list","str","ai","string","numrai",NULL};
+static const char* g_known_modules[] = {"time","datetime","math","os","io","sys","list","str","ai","string",NULL}; /* numrai removed: advertised but never implemented (audit finding #17) */
 
 // ── Module alias resolution ──────────────────────────────────────────────────
 // Given a namespace token (e.g. "np" or "m"), look it up in cg->alias_from[].
@@ -4350,22 +4465,33 @@ static int is_known_module(const char* name){
     /* 1. built-in modules */
     for(int i=0;g_known_modules[i];i++)
         if(strcmp(g_known_modules[i],name)==0) return 1;
-    /* 2. installed packages:
-          %LOCALAPPDATA%\Programs\omnikarai\site-packages\<name>\
-       Falls back to %USERPROFILE%\AppData\Local\... if LOCALAPPDATA not set. */
+    /* 2. installed packages under the platform site-packages directory:
+         Windows: %LOCALAPPDATA%\Programs\omnikarai\site-packages\<name>\
+                  (falls back to %USERPROFILE%\AppData\Local\...)
+         POSIX:   $XDG_DATA_HOME/omnikarai/site-packages/<name>/
+                  (falls back to ~/.local/share/omnikarai/site-packages/) */
+    char buf[1024];
+#if defined(_WIN32)
     const char* lad = getenv("LOCALAPPDATA");
-    if(!lad){
+    if(lad){
+        snprintf(buf, sizeof(buf),
+            "%s\\Programs\\omnikarai\\site-packages\\%s", lad, name);
+    } else {
         const char* home = getenv("USERPROFILE");
         if(!home) return 0;
-        char buf[1024];
         snprintf(buf, sizeof(buf),
             "%s\\AppData\\Local\\Programs\\omnikarai\\site-packages\\%s", home, name);
-        DWORD a = GetFileAttributesA(buf);
-        return (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY));
     }
-    char buf[1024];
-    snprintf(buf, sizeof(buf),
-        "%s\\Programs\\omnikarai\\site-packages\\%s", lad, name);
+#else
+    const char* xdg = getenv("XDG_DATA_HOME");
+    const char* home = getenv("HOME");
+    if(xdg && *xdg)
+        snprintf(buf, sizeof(buf), "%s/omnikarai/site-packages/%s", xdg, name);
+    else if(home)
+        snprintf(buf, sizeof(buf), "%s/.local/share/omnikarai/site-packages/%s", home, name);
+    else
+        return 0;
+#endif
     DWORD a = GetFileAttributesA(buf);
     return (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY));
 }
@@ -4411,7 +4537,7 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
                         else if(!strcmp(op,"*=")) emit_imul_rax_rcx(&cg->code);
                         else if(!strcmp(op,"/=")) emit_idiv_rcx(&cg->code);
                         else if(!strcmp(op,"%=")) emit_mod_rax_rcx(&cg->code);
-                        else if(!strcmp(op,"**=")){emit_mov_rdx_rcx(&cg->code);emit_mov_rcx_rax(&cg->code);cg_call_extern(cg,g_fn_int_pow);}
+                        else if(!strcmp(op,"**=")){emit_mov_arg1_rcx(&cg->code);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_int_pow);}
                         /* store result back */
                         if(_pr>=0){switch(_pr){case 0:emit_u8(&cg->code,0x49);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0xC6);break;case 1:emit_u8(&cg->code,0x49);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0xC7);break;case 2:emit_mov_rbx_rax(&cg->code);break;case 3:emit_mov_r12_rax(&cg->code);break;case 4:emit_mov_r13_rax(&cg->code);break;case 5:emit_mov_rsi_rax(&cg->code);break;case 6:emit_mov_rdi_rax(&cg->code);break;}}
                         emit_store_rax(&cg->code,sym->stack_offset);
@@ -4429,7 +4555,7 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
                         cg_expr(cg,ix->index);emit_store_rax(&cg->code,is2);
                         cg_expr(cg,inf->right);emit_store_rax(&cg->code,rs);
                         /* read current: list.get(lst, idx) */
-                        emit_load_rcx(&cg->code,ls);emit_load_rdx(&cg->code,is2);
+                        emit_load_arg0(&cg->code,ls);emit_load_arg1(&cg->code,is2);
                         cg_call_extern(cg,g_fn_list_get);
                         emit_load_rcx(&cg->code,rs);
                         const char*op=inf->operator;
@@ -4442,7 +4568,7 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
                         int vs=cg->scope->next_offset;cg->scope->next_offset+=8;
                         if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
                         emit_store_rax(&cg->code,vs);
-                        emit_load_rcx(&cg->code,ls);emit_load_rdx(&cg->code,is2);emit_load_r8(&cg->code,vs);
+                        emit_load_arg0(&cg->code,ls);emit_load_arg1(&cg->code,is2);emit_load_arg2(&cg->code,vs);
                         cg_call_extern(cg,g_fn_list_set);
                         cg->scope->next_offset-=4*8; break;
                     }
@@ -4459,9 +4585,9 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
                     cg_expr(cg,ix->index); emit_store_rax(&cg->code,is2);
                     cg_expr(cg,inf->right);emit_store_rax(&cg->code,vs);
                     /* list.set(rcx=lst, rdx=idx, r8=val) */
-                    emit_load_rcx(&cg->code,ls);
-                    emit_load_rdx(&cg->code,is2);
-                    emit_load_r8(&cg->code,vs);
+                    emit_load_arg0(&cg->code,ls);
+                    emit_load_arg1(&cg->code,is2);
+                    emit_load_arg2(&cg->code,vs);
                     cg_call_extern(cg,g_fn_list_set);
                     cg->scope->next_offset-=24; break;
                 }
@@ -4509,8 +4635,14 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
                         else if(!strcmp(aop,"%=")) emit_mod_rax_rcx(&cg->code);
                         else if(!strcmp(aop,"**=")){
                             /* pow(rax_base, rcx_exp): move rax->rcx_base, rdx->exp already in rcx */
-                            emit_mov_rdx_rcx(&cg->code); emit_mov_rcx_rax(&cg->code);
+                            /* FIX(N4): was passing int regs to a (double,double)
+                               function with XMM args never set — result was garbage.
+                               Convert both operands: CVTSI2SD xmm1,rcx (exp);
+                               CVTSI2SD xmm0,rax (base); call; XMM0->RAX. */
+                            emit_u8(&cg->code,0xF2);emit_u8(&cg->code,0x48);emit_u8(&cg->code,0x0F);emit_u8(&cg->code,0x2A);emit_u8(&cg->code,0xCE); /* cvtsi2sd xmm1, rcx */
+                            emit_int_to_float(&cg->code);   /* cvtsi2sd xmm0, rax */
                             cg_call_extern(cg,g_fn_math_pow);
+                            emit_xmm0_to_rax(&cg->code);
                         }
                         emit_store_rax(&cg->code,sym->stack_offset);
                         break;
@@ -4534,9 +4666,9 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
                     int s2=cg->scope->next_offset; cg->scope->next_offset+=8;
                     if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
                     emit_store_rax(&cg->code,s2);       /* save val */
-                    emit_load_rcx(&cg->code,s0);        /* rcx = obj */
-                    emit_load_rdx(&cg->code,s1);        /* rdx = idx */
-                    emit_load_r8(&cg->code,s2);         /* r8  = val */
+                    emit_load_arg0(&cg->code,s0);        /* rcx = obj */
+                    emit_load_arg1(&cg->code,s1);        /* rdx = idx */
+                    emit_load_arg2(&cg->code,s2);         /* r8  = val */
                     cg_call_extern(cg,g_fn_list_set);
                     cg->scope->next_offset-=24;
                     break;
@@ -4570,7 +4702,7 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
             if(!is_known_module(canon)){
                 fprintf(stderr,
                     "\nModuleError: Module '%s' not found\n"
-                    "  Built-in modules: time, datetime, math, os, io, sys, list, str, ai, numrai\n"
+                    "  Built-in modules: time, datetime, math, os, io, sys, list, str, ai\n"
                     "  Not installed: run  omnip install %s\n"
                     "  Search OPI:    omnip search %s\n"
                     "  Registry:      https://opi-nine.vercel.app\n\n",
@@ -4612,7 +4744,12 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
 // Both cases: after push rbp, RSP%16 == 0, so N must be a multiple of 16.
 // Include 32-byte shadow space in N.
 static uint32_t aligned_frame(int locals){
+#if defined(OMNI_ABI_WIN64)
     int N = locals + 32;   // include shadow space
+#else
+    int N = locals + 64;   // SysV: padding so stack args at [rsp+0..] never
+                           // overlap local slots (8-arg extern calls use it)
+#endif
     N = (N + 15) & ~15;    // round up to multiple of 16 → N%16 == 0
     return (uint32_t)N;
 }
@@ -4652,7 +4789,7 @@ static void cg_fn_body(CodeGen*cg,AST_Statement_FnDef*fn_def){
        The callee will save/restore its OWN pinned set; after return our values
        are intact.  Threshold lowered to 1 (pin anything used in a loop). */
     int ra_pinned=0;
-    for(int ri=0;ri<ra_nhv&&ra_pinned<5;ri++){
+    for(int ri=0;ri<ra_nhv&&ra_pinned<OMNI_MAX_PIN;ri++){
         if(ra_hv[ri].count<1) break;
         int is_param=0;
         for(int pi=0;pi<fn_def->parameter_count;pi++)
@@ -4689,11 +4826,20 @@ static void cg_fn_body(CodeGen*cg,AST_Statement_FnDef*fn_def){
         Symbol*p_sym=scope_define(fn_scope,pname,OMNI_TYPE_INT);
         if(i==0&&(!strcmp(pname,"self")))cg->self_slot=p_sym->stack_offset;
         if(p_sym->stack_offset>cg->stack_size)cg->stack_size=p_sym->stack_offset;
+        /* Store incoming ABI arg registers into frame slots (include/abi.h):
+           Win64: RCX,RDX,R8,R9   SysV: RDI,RSI,RDX,RCX */
         switch(i){
-            case 0:emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x8D);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break;
-            case 1:emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x95);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break;
-            case 2:emit_u8(&cg->code,REX_WR);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x85);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break;
-            case 3:emit_u8(&cg->code,REX_WR);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x8D);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break;
+#if defined(OMNI_ABI_WIN64)
+            case 0:emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x8D);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break; /* [rbp-d],RCX */
+            case 1:emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x95);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break; /* [rbp-d],RDX */
+            case 2:emit_u8(&cg->code,REX_WR);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x85);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break; /* [rbp-d],R8  */
+            case 3:emit_u8(&cg->code,REX_WR);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x8D);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break; /* [rbp-d],R9  */
+#else
+            case 0:emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0xBD);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break; /* [rbp-d],RDI */
+            case 1:emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0xB5);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break; /* [rbp-d],RSI */
+            case 2:emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x95);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break; /* [rbp-d],RDX */
+            case 3:emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0x8D);emit_u32(&cg->code,(uint32_t)(-p_sym->stack_offset));break; /* [rbp-d],RCX */
+#endif
         }
     }
 
@@ -4945,14 +5091,41 @@ int codegen_compile(CodeGen*cg,AST_Program*program){
     BETA_TRACE_CG("compile done: %zu bytes, %d fns, %d strings",cg->code.size,cg->fn_count,cg->string_pool_count);
     return 1;
 }
+// ── Executable memory (W^X): allocate RW → copy → switch to RX → run → free ──
+// Avoids permanently-WX pages on both platforms (Phase 10 hardening).
+#if defined(_WIN32)
+static void* omni_exec_alloc(size_t sz){
+    return VirtualAlloc(NULL,sz,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+}
+static int omni_exec_rx(void* p,size_t sz){
+    DWORD old=0;
+    return VirtualProtect(p,sz,PAGE_EXECUTE_READ,&old)?0:-1;
+}
+static void omni_exec_free(void* p,size_t sz){ (void)sz; VirtualFree(p,0,MEM_RELEASE); }
+#else
+#include <sys/mman.h>
+static void* omni_exec_alloc(size_t sz){
+    return mmap(NULL,sz,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+}
+static int omni_exec_rx(void* p,size_t sz){
+    return mprotect(p,sz,PROT_READ|PROT_EXEC);
+}
+static void omni_exec_free(void* p,size_t sz){ munmap(p,sz); }
+#endif
+
 int64_t codegen_run(CodeGen*cg){
     if(cg->code.size==0){fprintf(stderr,"CodeGen: nothing to run\n");return -1;}
-    void*mem=VirtualAlloc(NULL,cg->code.size,MEM_COMMIT|MEM_RESERVE,PAGE_EXECUTE_READWRITE);
-    if(!mem){fprintf(stderr,"CodeGen: VirtualAlloc failed (%lu)\n",GetLastError());return -1;}
+    void*mem=omni_exec_alloc(cg->code.size);
+    if(!mem||mem==(void*)-1){fprintf(stderr,"CodeGen: executable-memory allocation failed\n");return -1;}
     memcpy(mem,cg->code.data,cg->code.size);
+    if(omni_exec_rx(mem,cg->code.size)!=0){
+        fprintf(stderr,"CodeGen: failed to make JIT memory executable\n");
+        omni_exec_free(mem,cg->code.size);
+        return -1;
+    }
     typedef int64_t(*OmniEntry)(void);
     int64_t result=((OmniEntry)mem)();
-    VirtualFree(mem,0,MEM_RELEASE);
+    omni_exec_free(mem,cg->code.size);
     return result;
 }
 void codegen_dump(CodeGen*cg){

@@ -2,6 +2,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include "omni_platform.h"
 #include "lexer.h"
 
 #define INDENT_STACK_SIZE 100
