@@ -3,7 +3,9 @@
 const { sql } = require('../_db');
 const { jwtVerify } = require('jose');
 
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET || 'opi-dev-secret');
+const { getJwtSecret } = require('../_auth');
+// Fail secure (finding #10): no hardcoded fallback — throws when JWT_SECRET is unset.
+const SECRET = getJwtSecret();
 
 function cors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');

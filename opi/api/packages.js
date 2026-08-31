@@ -53,7 +53,8 @@ module.exports = async function handler(req, res) {
     } else {
       try {
         const { jwtVerify } = await import('jose');
-        const secret = new TextEncoder().encode(process.env.JWT_SECRET || 'opi-dev-secret');
+        const { getJwtSecret } = require('./_auth');
+        const secret = getJwtSecret(); /* fail secure (finding #10) */
         const { payload } = await jwtVerify(Buffer.from(token, 'utf8'), secret);
         username = payload.username;
       } catch {
