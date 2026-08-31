@@ -1,0 +1,63 @@
+name: linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    name: gcc — build + full test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build omnicc
+        run: make
+
+      - name: Unit tests (t01–t21)
+        run: python3 tests/run_tests.py
+
+      - name: Stress tests (stress01–stress09)
+        run: python3 tests/run_tests.py --stress
+
+      - name: Smoke: standalone build
+        run: |
+          printf 'print("ci standalone")\nprint(21 * 2)\n' > /tmp/ci_smoke.ok
+          ./bin/omnicc build /tmp/ci_smoke.ok
+          /tmp/ci_smoke.exe
+
+  sanitizers:
+    name: asan+ubsan — build + test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with ASan + UBSan
+        run: make asan
+
+      - name: Unit tests under sanitizers
+        run: |
+          export ASAN_OPTIONS=detect_leaks=0
+          python3 tests/run_tests.py
+
+      - name: Stress tests under sanitizers
+        run: |
+          export ASAN_OPTIONS=detect_leaks=0
+          python3 tests/run_tests.py --stress
+
+  portable:
+    name: no-AVX2 scalar build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build portable (scalar kernels)
+        run: make portable
+
+      - name: Unit tests (scalar paths)
+        run: python3 tests/run_tests.py
+
+      - name: Stress tests (scalar paths)
+        run: python3 tests/run_tests.py --stress

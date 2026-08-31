@@ -1,0 +1,36 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  mingw:
+    name: MinGW-w64 gcc — build + test suite
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            python
+
+      - name: Build omnicc.exe (Win64 ABI)
+        run: |
+          make windows CFLAGS="-Iinclude -O2 -g -std=c99 -Wall -Wextra -fno-strict-aliasing"
+
+      - name: Unit tests (Win64 ABI)
+        run: python tests/run_tests.py
+
+      - name: Stress tests (Win64 ABI)
+        run: python tests/run_tests.py --stress

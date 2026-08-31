@@ -1,242 +1,174 @@
 # Omnikarai
 
-**A compiled language that produces native x86-64 machine code directly.**  
-No LLVM. No runtime. No VM. One binary. Ships as `omnicc.exe`.
+**A small compiled language that produces native x86-64 machine code directly.**
+No LLVM. No bytecode VM. One C99 compiler. Runs on Linux and Windows.
 
 ```
 print("Hello, World!")
 ```
 
 ```
-omnicc run hello.ok
-→ Hello, World!
+$ omnicc run hello.ok
+Hello, World!
 ```
 
 ---
 
 ## What it is
 
-Omnikarai is a programming language with Python-like syntax that compiles straight to native Windows x86-64 machine code. The compiler handles everything — lexing, parsing, and code generation — and produces real machine instructions that run at CPU speed with zero overhead layers.
+Omnikarai is an imperative language with Python-like syntax that compiles to
+native x86-64 machine code. The compiler (`omnicc`) handles lexing, parsing,
+code generation, and execution in one ~7,500-line C99 codebase, with no
+external dependencies beyond libc/libm:
 
-The compiler is a single C file under 4,000 lines. The entire toolchain is one executable.
+- `src/lexer.c` — hand-written scanner
+- `src/parser.c` — recursive-descent parser with an AST
+- `src/codegen.c` — x86-64 code generator (Win64 + SysV ABIs, AVX2 kernels)
+- `src/main.c` — CLI: `run`, `build`, `dump`, `check`
 
----
+Generated code executes at native speed: function calls follow the platform
+calling convention, and the AI/math kernels emit SIMD instructions
+(`VFMADD231PS`, `VPMADDUBSW`, `VMAXPS`) directly, with scalar fallbacks for
+CPUs without AVX2.
+
+The compiler is a real compiler, not a wrapper: it emits x86-64 instruction
+encodings byte by byte — REX prefixes, ModRM/SIB, displacement patching,
+forward-jump resolution, relocation of helper addresses.
+
+## Platforms
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Linux x86-64 | **supported** (primary CI) | gcc, SysV ABI |
+| Windows x64 | supported (CI) | MinGW-w64 gcc, Win64 ABI |
+
+Both platforms run the same 30-test suite (21 unit + 9 stress) in CI under
+their respective calling conventions.
 
 ## Quick start
 
-```powershell
-# Run a program
-omnicc run myprogram.ok
+```
+make                                  # build bin/omnicc
+python3 tests/run_tests.py --stress   # verify the toolchain (30 tests)
 
-# Build a standalone .exe
-omnicc build myprogram.ok
-
-# Inspect the generated machine code
-omnicc dump myprogram.ok
-
-# Check for syntax errors without running
-omnicc check myprogram.ok
+./bin/omnicc run hello.ok             # JIT: compile and execute in-process
+./bin/omnicc build hello.ok           # standalone executable (embeds runtime)
+./bin/omnicc check hello.ok           # parse + check only
+./bin/omnicc dump hello.ok            # dump generated machine code
 ```
 
----
+`omnicc build` produces a standalone executable — a copy of the omnicc
+engine with your program embedded, which recompiles it in-process at
+startup. The result runs on any same-platform machine with nothing
+installed.
 
 ## The language
 
-Omnikarai looks like Python. It runs like C.
+Python-shaped, C-shaped at runtime:
 
 ```python
-fn fib(n):
-    if n <= 1:
-        return n
-    return fib(n - 1) + fib(n - 2)
+use math
 
-print(fib(10))
+fn is_prime(n):
+    if n < 2:
+        return 0
+    set d = 2
+    while d * d <= n:
+        if n % d == 0:
+            return 0
+        set d = d + 1
+    return 1
+
+print(is_prime(97))          # 1
+print(math.sqrt(144.0))      # 12
+print("fib(10) = " + fib(10))
 ```
 
-```python
-use time
+Full syntax reference: [docs/LANGUAGE.md](docs/LANGUAGE.md) ·
+module reference: [docs/MODULES.md](docs/MODULES.md).
 
-set t0 = time.now()
-set i = 0
-set total = 0
-while i < 1000000:
-    set total = total + i
-    set i = i + 1
-set ms = time.ms(t0)
-print(total)
-print(ms)
-```
+- Indentation-based blocks, `fn`/`set`/`while`/`for`/`match`, classes
+- int64 / 64-bit float / bool / string / list / nil
+- Signed division truncates toward zero (C semantics) — verified by tests
+  against negative operands
+- User functions are statically type-inferred for printing and string ops
 
-**Core features:**
-- Indentation-based blocks (no braces, no semicolons)
-- Type inference — no annotations needed
-- Functions, recursion, nested calls
-- `if / elif / else`, `while`, `for i in range(n)`, `match / case`
-- Lists, strings, booleans, integers, floats
-- Modules: `math`, `io`, `os`, `sys`, `time`, `datetime`, `list`, `str`, `ai`
-- AVX2/FMA matrix operations in the `ai` module
-- `use` imports from the OPI package registry
+## The AI kernels
 
-**Standard library modules:**
-
-| Module | What it does |
-|--------|-------------|
-| `time` | High-precision timers via QueryPerformanceCounter |
-| `datetime` | System clock, date formatting, timezone |
-| `math` | sqrt, sin, cos, log, floor, ceil, min, max, gcd |
-| `os` | exit, cwd, getenv, mkdir, getpid |
-| `io` | read, write, append, exists, delete, size |
-| `sys` | version, platform, arch |
-| `list` | new, push, pop, get, set, len, free |
-| `str` | eq, concat, len, slice, toint, fromint |
-| `ai` | alloc, free, matmul, relu, dot, softmax, layernorm |
-
----
-
-## Performance
-
-Current benchmark results on an Intel i5-8350U (4-core, 15W), Windows x64:
-
-| Benchmark | Omnikarai | C -O3 | Python | Node.js |
-|-----------|-----------|-------|--------|---------|
-| Loop 100M | 230ms | 11ms | 29,970ms | 8,000ms |
-| Fib(40) ×5 | 7,323ms | 1,954ms | 202,673ms | 11,144ms |
-| Primes ×30 | 1,355ms | 360ms | 14,927ms | 503ms |
-| Dotprod ×10k | 280ms | 109ms | 16,521ms | 128ms |
-| Matmul ×5k | 979ms | 133ms | 1,747ms | 1,337ms |
-
-**vs Python:** 3× to 130× faster across all benchmarks.  
-**vs Node.js:** competitive — wins on loops and large computation, competitive on math.  
-**vs C -O3:** 2.5×–7× slower currently. The gap is the register allocator in progress — see `docs/OPTIMIZATION_PLAN.md`.
-
-Honest note: GCC has 35 years of optimization engineering. Omnikarai's register allocator is actively being built. The architecture is correct and the ceiling is high. The matmul gap went from 36× to 7× in one sprint.
-
----
-
-## How it works
-
-The compilation pipeline is five stages:
+The `ai` module emits SIMD machine code directly:
 
 ```
-source.ok
-    ↓  Lexer       tokenize, emit INDENT/DEDENT
-    ↓  Parser      Pratt parser → AST
-    ↓  Codegen     walk AST, emit x86-64 bytes directly
-    ↓  VirtualAlloc  allocate executable memory (JIT mode)
-    ↓  PE writer   write .exe (build mode)
-       ↓
-       runs
+use ai
+
+set a = ai.alloc(1024)     # 64-byte aligned, zeroed
+set b = ai.alloc(1024)
+# ... ai.set(a, i, bits) / ai.set_u8(a, i, byte) ...
+ai.dot(a, b, 1024)         # FP32 dot product — VFMADD231PS, 8 floats/cycle
+ai.dot_i8(a, b, 1024)      # INT8 dot product — VPMADDUBSW, 32 ops/cycle
+ai.matmul(A, x, y, 256, 256)   # cache-tiled matrix × vector
+ai.relu(x, 1024)           # VMAXPS
+ai.softmax(x, 1024)        # fused AVX2 exp
 ```
 
-No intermediate representation. No optimization passes yet (they're coming). One-pass direct emission.
+INT8 buffers must be populated with `ai.set_u8` / `ai.set_i8` (added in
+v7.1.0); `ai.set` writes FP32 bit patterns and is not byte-compatible.
 
-**`omnicc run`** — compiles source to machine bytes in memory, calls them as a function via `VirtualAlloc`, returns the exit code. Zero disk writes. Compilation + execution in one step.
+## Benchmarks
 
-**`omnicc build`** — compiles source to machine bytes, then writes a valid PE32+ Windows `.exe` with a `.text` section (trampoline + JIT code), `.idata` section (KERNEL32.DLL imports), and `.reloc` section (base relocation table for ASLR). The output file runs standalone.
-
----
-
-## Build from source
-
-Requires `gcc` (MinGW-w64 or MSYS2):
-
-```powershell
-gcc -Iinclude -O2 -o bin/omnicc.exe src/main.c src/lexer.c src/parser.c src/codegen.c -lkernel32 -lm
-```
-
-Or use the Makefile:
-
-```powershell
-make
-```
-
----
-
-## Run the test suite
-
-```powershell
-.\tests\run_tests.ps1      # 15 tests: arithmetic through modules
-.\tests\run_stress.ps1     # 9 stress tests: algorithms, recursion
-.\benchmarks\run_benchmarks.ps1   # vs C, C++, Python, Node.js
-```
-
-Current status: **15/15 tests pass. 9/9 stress tests pass.**
-
----
-
-## Project structure
+Multi-language benchmark programs live in `benchmarks/` (Omnikarai vs C,
+C++, Go, Java, JavaScript, Python) for fib, loops, primes, matmul and dot
+products. Run them yourself:
 
 ```
-src/
-  main.c       CLI entry point, omnicc build PE writer
-  lexer.c      tokenizer, INDENT/DEDENT emission
-  parser.c     Pratt parser → AST
-  codegen.c    x86-64 native code emitter, all runtime helpers
-
-include/
-  lexer.h      token types, Lexer struct
-  parser.h     Parser struct
-  ast.h        all AST node types
-  codegen.h    CodeGen struct, public API
-
-tests/
-  t01_core_arithmetic.ok  through  t15_assert.ok
-  t16_ai_alloc.ok  through  t20_ai_dot_i8.ok
-  stress01 through stress09
-  run_tests.ps1
-  run_stress.ps1
-
-benchmarks/
-  bench_loop_timed.ok      bench_loop.py    bench_loop.c
-  bench_fib_timed.ok       bench_fib.py     bench_fib.c
-  bench_primes_timed.ok    bench_primes.py  bench_primes.c
-  bench_dotprod_timed.ok   bench_dotprod.py bench_dotprod.c
-  bench_matmul_timed.ok    bench_matmul.py  bench_matmul.c
-  run_benchmarks.ps1
-
-docs/
-  OMNIKARAI_BOOK.md        full compiler internals reference
-  KNOWN_ISSUES.md          active bugs and limitations
-  OPTIMIZATION_PLAN.md     register allocator and SIMD roadmap
-  SPEED_GOD_PLAN.md        beating C on AI workloads — the thesis
-  BENCHMARK_RESULTS.md     historical benchmark tracking
-
-opi/
-  package registry (Omnikarai Package Index) — web interface
-
-bin/
-  omnicc.exe               compiled compiler (gitignored)
+python3 benchmarks/run_benchmarks.py
 ```
 
----
+Results are machine- and compiler-flag-dependent; the runner prints
+everything it measures so you can reproduce it on your hardware. We do not
+publish claimed speedups without the runner output next to them.
 
-## What's being built right now
+## Tests
 
-**Register allocator** — pins the hottest variables in each function into CPU registers (RBX, R12, R13, RSI, RDI) instead of stack slots. This is the single change that closes most of the C gap. Currently implemented for `while` loops; function-level RA is in progress.
+```
+python3 tests/run_tests.py            # 21 unit tests
+python3 tests/run_tests.py --stress   # + 9 stress suites
+```
 
-**Ephemeral computation** — eliminates store/load pairs for temporary variables that are used exactly once. `set a = x + 1; set b = a * y` currently spills `a` to the stack and immediately reloads it. The ephemeral pass detects this and keeps `a` in a register.
+CI (`.github/workflows/`) runs the full suite on Linux gcc, Linux with
+ASan+UBSan, Linux scalar (no AVX2), and Windows MinGW.
 
-**LICM (loop-invariant code motion)** — hoists expressions whose inputs don't change inside a loop to before the loop. `(i + k) % 17` inside a `while k < n` loop can hoist `i % 17` to before the loop and run a cheap running counter for `k`.
+## Repository layout
 
-**`ai.*` AVX2 primitives** — AVX2 FP32 matrix multiply, ReLU, softmax, layernorm already implemented in the runtime. Beating Python + NumPy on CPU-resident AI inference is the target.
+```
+src/           compiler sources (lexer, parser, codegen, CLI)
+include/       headers: abi.h (calling conventions), omni_platform.h, ...
+tests/         21 unit tests + 9 stress tests + portable runner
+benchmarks/    cross-language benchmark programs + reproducible runner
+docs/          language, modules, architecture, building, packages
+opi/           package registry service (Node.js / Vercel / Neon)
+omnip/         package manager client (Windows-only at this release)
+```
 
----
+## Known limitations (read before evaluating)
 
-## Part of FRAZIYM
+Stated plainly, because this project has previously overstated itself:
 
-Omnikarai is the language layer of the FRAZIYM tech stack:
+1. **No optimizer.** There is no scheduling, no SSA, no register allocation
+   beyond loop-scoped pinning of hot variables. Generated code is
+   straightforward, correct, and not competitive with -O2 C on
+   register-heavy code.
+2. **`omnip` is Windows-only.** The compiler is cross-platform; the package
+   manager client is not yet (WinHTTP dependency). See
+   [docs/PACKAGES.md](docs/PACKAGES.md).
+3. **Standalone builds embed the engine.** `omnicc build` produces a
+   ~1 MB executable because it contains the runtime; it is not a
+   minimal-size native binary.
+4. **No debugger, no LSP, no incremental compilation.**
+5. **Single-module programs.** `use <pkg>` loads installed packages; there
+   is no user-level module resolution within one program beyond functions
+   and classes.
 
-- **Omnikarai** — language and native compiler
-- **OPI** — Omnikarai Package Index (registry + CLI)
-- **AXONIX** — offline agentic AI runtime
-- **XorZen** — custom transformer architecture
+## License
 
-Built by one person. No team. No funding. No excuses.
-
----
-
-## Status
-
-**v6.1** — active development. Core language stable and fully tested. Register allocator in progress. `omnicc build` (standalone .exe) functional — see `docs/KNOWN_ISSUES.md` for current limitations.
-
-*Omnikarai by Akik Faraji — FRAZIYM Tech & AI*
+MIT — see [LICENSE](LICENSE). Third-party notices:
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

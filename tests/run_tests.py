@@ -19,14 +19,20 @@ import sys
 HERE     = os.path.dirname(os.path.abspath(__file__))
 ROOT     = os.path.dirname(HERE)
 IS_WIN   = (os.name == "nt")
-OMNICC   = os.path.join(ROOT, "bin", "omnicc.exe" if IS_WIN else "omnicc")
+# Prefer the .exe whenever it exists (MinGW/MSYS2 builds report os.name
+# "posix" but still produce bin/omnicc.exe); fall back to the POSIX name.
+_cand_exe = os.path.join(ROOT, "bin", "omnicc.exe")
+_cand_bin = os.path.join(ROOT, "bin", "omnicc")
+OMNICC    = _cand_exe if os.path.exists(_cand_exe) else _cand_bin
 
 # Platform-adjusted expectations (honest per-host values, no weakening:
 # the same assertions hold, only the platform strings differ per host).
-if IS_WIN:
-    OS_NAME, SYS_PLAT, SYS_VER = "windows", "windows-x64", "Omnikarai v6.02.24 (x86-64 Windows)"
+# They follow the BINARY that was found, not the Python interpreter — an
+# MSYS2 Python on Windows reports os.name "posix" but runs omnicc.exe.
+if OMNICC.endswith(".exe"):
+    OS_NAME, SYS_PLAT, SYS_VER = "windows", "windows-x64", "Omnikarai v7.1.0 (x86-64 Windows)"
 else:
-    OS_NAME, SYS_PLAT, SYS_VER = "linux", "linux-x64", "Omnikarai v6.02.24 (x86-64 Linux)"
+    OS_NAME, SYS_PLAT, SYS_VER = "linux", "linux-x64", "Omnikarai v7.1.0 (x86-64 Linux)"
 
 TESTS = [
     ("t01_core_arithmetic.ok", "Core Arithmetic",      "10,3,13,7,30,3,1,true,true,true,true,true,true"),
@@ -41,7 +47,7 @@ TESTS = [
     ("t10_datetime.ok",        "Datetime module",      "*"),
     ("t11_os.ok",              "OS module",            f"{OS_NAME},*,*,1"),
     ("t12_io.ok",              "IO module",            "1,1,Hello Omnikarai,1,1,0"),
-    ("t13_sys.ok",             "Sys module",           f"{SYS_VER},{SYS_PLAT},6.02.24,64"),
+    ("t13_sys.ok",             "Sys module",           f"{SYS_VER},{SYS_PLAT},7.1.0,64"),
     ("t14_list.ok",            "List module",          "0,3,10,20,30,30,2,1,0"),
     ("t15_assert.ok",          "Assert builtin",       "ok,done"),
     ("t16_ai_alloc.ok",        "AI alloc/set/get/free","1065353216,1090519040,0"),

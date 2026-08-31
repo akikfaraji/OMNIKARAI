@@ -1,5 +1,5 @@
 // ============================================================
-//  OMNIKARAI Compiler — omnicc  v6.02.24
+//  OMNIKARAI Compiler — omnicc  v7.1.0
 //  Windows x64 — No LLVM — No runtime dependency
 //
 //  Usage:
@@ -50,7 +50,7 @@ static void print_version(void) {
     const char* plat = "Linux/macOS (POSIX)";
 #endif
     fprintf(stderr,
-        "Omnikarai Compiler (omnicc) v6.02.24\n"
+        "Omnikarai Compiler (omnicc) v7.1.0\n"
         "  x86-64 native code | %s | No LLVM | No dependencies\n"
         "  Modules: time, datetime, math, os, io, sys, list, str, ai\n"
         "  Registry: https://opi-nine.vercel.app\n",

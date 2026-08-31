@@ -551,9 +551,9 @@ __attribute__((noinline)) int64_t omni_io_size(const char* path) {
 // ============================================================
 __attribute__((noinline)) const char* omni_sys_version(void) {
 #if defined(_WIN32)
-    return "Omnikarai v6.02.24 (x86-64 Windows)";
+    return "Omnikarai v7.1.0 (x86-64 Windows)";
 #else
-    return "Omnikarai v6.02.24 (x86-64 Linux)";
+    return "Omnikarai v7.1.0 (x86-64 Linux)";
 #endif
 }
 __attribute__((noinline)) const char* omni_sys_platform(void) {
@@ -564,7 +564,7 @@ __attribute__((noinline)) const char* omni_sys_platform(void) {
 #endif
 }
 __attribute__((noinline)) const char* omni_sys_arch(void)      { return "x86_64"; }
-__attribute__((noinline)) const char* omni_sys_omni_ver(void)  { return "6.02.24"; }
+__attribute__((noinline)) const char* omni_sys_omni_ver(void)  { return "7.1.0"; }
 __attribute__((noinline)) int64_t     omni_sys_bits(void)      { return 64; }
 
 // ============================================================
