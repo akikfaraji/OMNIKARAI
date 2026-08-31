@@ -235,10 +235,18 @@ static inline int omni_strcpy_s(char* dst, size_t dsz, const char* src) {
 #define strcpy_s(d, dsz, s) omni_strcpy_s((d), (size_t)(dsz), (s))
 static inline int omni_strncpy_s(char* dst, size_t dsz, const char* src, size_t count) {
     if (!dst || dsz == 0) return 1;
-    size_t k = (count == (size_t)-1) ? dsz - 1 : (count < dsz - 1 ? count : dsz - 1);
-    if (src && k > 0) memcpy(dst, src, k);
+    /* MSVC semantics: copy min(count, strlen(src)) chars, never more than
+       dsz-1, always NUL-terminate. The earlier shim ignored strlen(src)
+       and memcpy'd a full 63 bytes from short heap strings — an OOB read
+       that ASan caught immediately. */
+    if (!src) { dst[0] = '\0'; return 1; }
+    size_t slen = strlen(src);
+    size_t k = slen;
+    if (count != (size_t)-1 && count < k) k = count;
+    if (k > dsz - 1) k = dsz - 1;
+    if (k > 0) memcpy(dst, src, k);
     dst[k] = '\0';
-    return 0;
+    return (slen > k && count != (size_t)-1) ? 1 : 0;
 }
 #define strncpy_s(d, dsz, s, c) omni_strncpy_s((d), (size_t)(dsz), (s), (size_t)(c))
 static inline int omni_strncat_s(char* dst, size_t dsz, const char* src, size_t count) {

@@ -1461,7 +1461,6 @@ __attribute__((noinline)) void omni_ai_gemm(int64_t C_ptr, int64_t A_ptr, int64_
     memcpy(&beta, &beta_bits, 4);
     float*       C = (float*)(uintptr_t)C_ptr;
     const float* A = (const float*)(uintptr_t)A_ptr;
-    const float* B = (const float*)(uintptr_t)B_ptr;
 
     // Scale C by beta
     if (beta == 0.0f) {
@@ -2122,7 +2121,6 @@ static int fn_is_inlineable(AST_Statement_FnDef*fd){
                 /* Allow simple if/return patterns like relu, clamp */
                 if(is->consequence&&is->consequence->statement_count>3)return 0;
                 if(is->alternative){
-                    AST_Statement_If*alt=(AST_Statement_If*)is->alternative;
                     if(is->alternative->type==IF_STATEMENT&&((AST_Statement_If*)is->alternative)->consequence&&((AST_Statement_If*)is->alternative)->consequence->statement_count>3)return 0;
                 }
                 break;
@@ -2209,7 +2207,6 @@ static void cg_inline_call(CodeGen*cg,FnEntry*fe,AST_Expression**args,int argc){
         ps->next=mini->buckets[idx];mini->buckets[idx]=ps;
     }
     SymbolTable*saved_scope=cg->scope;
-    int saved_next=cg->scope->next_offset;
     int saved_ret=cg->returned;
     cg->scope=mini;
     /* Emit the body with return→jmp translation (see cg_inline_stmts above).
@@ -4212,7 +4209,6 @@ static void cg_for_range(CodeGen*cg,AST_Statement_For*stmt,AST_Expression_Call*r
 
         if(use_reg){
             // Pin counter in r14 or r15
-            const char* reg_name = (reg_level == 0) ? "r14" : "r15";
             strncpy_s(cg->reg_var_names[reg_level], 64, iter_name, _TRUNCATE);
             cg->reg_var_depth++;
             // Also define iter as a stack var so body code can reference it by name
