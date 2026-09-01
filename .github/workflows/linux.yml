@@ -44,7 +44,7 @@ jobs:
       - name: Regression suite (historical bug classes)
         run: python3 tests/run_regression.py
 
-      - name: Smoke: standalone build
+      - name: "Smoke: standalone build"
         run: |
           printf 'print("ci standalone")\nprint(21 * 2)\n' > /tmp/ci_smoke.ok
           ./bin/omnicc build /tmp/ci_smoke.ok
@@ -93,3 +93,40 @@ jobs:
 
       - name: Stress tests (scalar paths)
         run: python3 tests/run_tests.py --stress
+
+  linux-arm64:
+    name: aarch64 — diagnostics tier (honest skips)
+    needs: preflight
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build omnicc (scalar kernel tier auto-selected on aarch64)
+        run: make
+
+      - name: Version consistency gate
+        run: python3 tests/check_version.py
+
+      - name: Tiered suites (codegen tests SKIP with reason on aarch64)
+        run: |
+          python3 tests/run_tests.py
+          python3 tests/run_tests.py --stress
+          python3 tests/run_regression.py
+
+      - name: "Diagnostics smoke: check --json works on this host"
+        run: |
+          printf 'set x = 41\nprint(x + 1)\n' > /tmp/smoke.ok
+          ./bin/omnicc check --json /tmp/smoke.ok
+
+      - name: "Honest refusal: run must fail OMNI-E0005 (exit 2), never SIGILL"
+        run: |
+          set +e
+          out=$(./bin/omnicc run /tmp/smoke.ok 2>&1); code=$?
+          set -e
+          echo "$out"
+          if [ "$code" -eq 2 ] && echo "$out" | grep -q "OMNI-E0005"; then
+            echo "OK: clean structured refusal (exit 2, OMNI-E0005)"
+          else
+            echo "FAIL: expected exit 2 + OMNI-E0005, got exit $code"
+            exit 1
+          fi
