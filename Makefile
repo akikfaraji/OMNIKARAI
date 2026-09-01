@@ -23,8 +23,16 @@
 UNAME   := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
+# -mstackrealign is x86-only: it makes every compiled runtime function
+# tolerate the JIT's alternating rsp parity at call sites (TD-18). On
+# non-x86-64 hosts the flag does not exist and must not be passed.
+STACKREALIGN = -mstackrealign
+ifeq ($(filter x86_64 amd64,$(UNAME_M)),)
+  STACKREALIGN =
+endif
+
 CC      ?= gcc
-CFLAGS  ?= -Iinclude -O2 -std=c99 -Wall -Wextra -fno-strict-aliasing -mstackrealign -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
+CFLAGS  ?= -Iinclude -O2 -std=c99 -Wall -Wextra -fno-strict-aliasing $(STACKREALIGN) -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
 LDLIBS  = -lm
 
 # Native language-runtime kernels: AVX2/FMA where the compiler defines them.
@@ -61,6 +69,7 @@ bin:
 	mkdir -p bin
 
 windows:
+	mkdir -p bin
 	x86_64-w64-mingw32-gcc $(CFLAGS) -O2 -o bin/omnicc.exe $(SOURCES) -lkernel32 -lm
 
 test: $(OMNICC)
