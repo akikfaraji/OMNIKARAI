@@ -2343,6 +2343,80 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
     if(strcmp(op,"and")==0){cg_expr(cg,node->left);emit_test_rax(&cg->code);size_t jf=emit_je_fwd(&cg->code);cg_expr(cg,node->right);emit_test_rax(&cg->code);emit_setcc_rax(&cg->code,0x95);size_t jend=emit_jmp_fwd(&cg->code);resolve_fwd(&cg->code,jf);emit_xor_rax_rax(&cg->code);resolve_fwd(&cg->code,jend);eph_invalidate(cg);return;}
     if(strcmp(op,"or")==0){cg_expr(cg,node->left);emit_test_rax(&cg->code);size_t jt=emit_jne_fwd(&cg->code);cg_expr(cg,node->right);emit_test_rax(&cg->code);emit_setcc_rax(&cg->code,0x95);size_t jend=emit_jmp_fwd(&cg->code);resolve_fwd(&cg->code,jt);emit_mov_rax_imm64(&cg->code,1);resolve_fwd(&cg->code,jend);eph_invalidate(cg);return;}
 
+    // ── FLOAT (SSE2 double) ARITHMETIC ────────────────────────────────────
+    /* V01.00 fix: the general integer path below treats double bit
+       patterns as int64 — `2.5 + 2.5` silently produced garbage. When
+       either operand is statically float, compile real SSE2 double
+       arithmetic instead. Supported: + - * / == != < > <= >= (IEEE
+       ordered comparisons; NaN != x is true). % and ** on floats are
+       loud TypeErrors (use the math module), never silent garbage. */
+    {
+        OmniType flt_lt=infer_type(cg,node->left);
+        OmniType flt_rt=infer_type(cg,node->right);
+        if(flt_lt==OMNI_TYPE_FLOAT||flt_rt==OMNI_TYPE_FLOAT){
+            int is_cmp=(strcmp(op,"==")==0||strcmp(op,"!=")==0||strcmp(op,"<")==0||
+                        strcmp(op,">")==0 ||strcmp(op,"<=")==0||strcmp(op,">=")==0);
+            int is_arith=(strcmp(op,"+")==0||strcmp(op,"-")==0||
+                          strcmp(op,"*")==0||strcmp(op,"/")==0);
+            if(!is_cmp && !is_arith){
+                omni_error(node->base.token.line,node->base.token.col,"TypeError",
+                           "operator '%s' is not supported for float operands (use the math module)",op);
+            }
+            int lslot=cg->scope->next_offset; cg->scope->next_offset+=8;
+            int rslot=cg->scope->next_offset; cg->scope->next_offset+=8;
+            if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
+
+            /* RHS → double bits into [rslot] (ints converted) */
+            cg_expr(cg,node->right);
+            if(flt_rt==OMNI_TYPE_INT||flt_rt==OMNI_TYPE_BOOL){
+                emit_int_to_float(&cg->code); emit_xmm0_to_rax(&cg->code);
+            }
+            eph_invalidate(cg);
+            emit_store_rax(&cg->code,rslot);
+
+            /* LHS → double bits into [lslot] */
+            cg_expr(cg,node->left);
+            if(flt_lt==OMNI_TYPE_INT||flt_lt==OMNI_TYPE_BOOL){
+                emit_int_to_float(&cg->code); emit_xmm0_to_rax(&cg->code);
+            }
+            eph_invalidate(cg);
+            emit_store_rax(&cg->code,lslot);
+            cg->scope->next_offset-=16;
+
+            emit_load_xmm0(&cg->code,lslot);
+            emit_load_xmm1(&cg->code,rslot);
+            if      (strcmp(op,"+")==0) emit_addsd(&cg->code);
+            else if (strcmp(op,"-")==0) emit_subsd(&cg->code);
+            else if (strcmp(op,"*")==0) emit_mulsd(&cg->code);
+            else if (strcmp(op,"/")==0) emit_divsd(&cg->code);
+            else {
+                /* UCOMISD xmm0,xmm1 — ordered comparisons need PF check
+                   to exclude unordered (NaN); != includes it (IEEE). */
+                emit_u8(&cg->code,0x66);emit_u8(&cg->code,0x0F);emit_u8(&cg->code,0x2E);emit_u8(&cg->code,0xC1);
+                uint8_t cc=0x94; /* sete default */
+                if     (strcmp(op,"!=")==0) cc=0x95;
+                else if(strcmp(op,"<" )==0) cc=0x92; /* setb  */
+                else if(strcmp(op,">" )==0) cc=0x97; /* seta  */
+                else if(strcmp(op,"<=")==0) cc=0x96; /* setbe */
+                else if(strcmp(op,">=")==0) cc=0x93; /* setae */
+                emit_u8(&cg->code,0x0F);emit_u8(&cg->code,cc);emit_u8(&cg->code,0xC0);   /* setcc al */
+                if(strcmp(op,"!=")==0){
+                    emit_u8(&cg->code,0x0F);emit_u8(&cg->code,0x9A);emit_u8(&cg->code,0xC1); /* setp cl */
+                    emit_u8(&cg->code,0x08);emit_u8(&cg->code,0xC1);                          /* or al,cl */
+                } else {
+                    emit_u8(&cg->code,0x0F);emit_u8(&cg->code,0x9B);emit_u8(&cg->code,0xC1); /* setnp cl */
+                    emit_u8(&cg->code,0x22);emit_u8(&cg->code,0xC1);                          /* and al,cl */
+                }
+                emit_u8(&cg->code,0x48);emit_u8(&cg->code,0x0F);emit_u8(&cg->code,0xB6);emit_u8(&cg->code,0xC0); /* movzx rax,al */
+                eph_invalidate(cg);
+                return;
+            }
+            emit_xmm0_to_rax(&cg->code);   /* double bits → RAX convention */
+            eph_invalidate(cg);
+            return;
+        }
+    }
+
     // ── CONSTANT RHS FAST PATHS ──────────────────────────────────────────────
     int rhs_is_const=(node->right&&node->right->type==INTEGER_LITERAL);
     int lhs_is_const=(node->left &&node->left ->type==INTEGER_LITERAL);
@@ -2531,10 +2605,13 @@ static OmniType infer_type(CodeGen*cg,AST_Expression*expr){
             AST_Expression_Infix*inf=(AST_Expression_Infix*)expr;
             const char*op=inf->operator;
             if(strcmp(op,"==")==0||strcmp(op,"!=")==0||strcmp(op,"<")==0||strcmp(op,">")==0||strcmp(op,"<=")==0||strcmp(op,">=")==0||strcmp(op,"and")==0||strcmp(op,"or")==0||strcmp(op,"not")==0)return OMNI_TYPE_BOOL;
-            if(strcmp(op,"+")==0){
+            if(strcmp(op,"+")==0||strcmp(op,"-")==0||strcmp(op,"*")==0||strcmp(op,"/")==0||strcmp(op,"%")==0||strcmp(op,"**")==0){
                 OmniType lt=infer_type(cg,inf->left);
                 OmniType rt=infer_type(cg,inf->right);
-                if(lt==OMNI_TYPE_STR||rt==OMNI_TYPE_STR)return OMNI_TYPE_STR;
+                if((lt==OMNI_TYPE_STR||rt==OMNI_TYPE_STR)&&strcmp(op,"+")==0)return OMNI_TYPE_STR;
+                /* V01.00: float arithmetic propagates — drives print/args/
+                   returns onto the double paths instead of int bits */
+                if(lt==OMNI_TYPE_FLOAT||rt==OMNI_TYPE_FLOAT)return OMNI_TYPE_FLOAT;
             }
             return OMNI_TYPE_INT;
         }
