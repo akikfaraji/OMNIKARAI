@@ -14,9 +14,14 @@
 #  runtime kernels. Running that binary on a pre-Haswell (2013) CPU
 #  is unsupported — use `make portable` there. The compiler itself
 #  does not require AVX2.
+#  Architecture note: AVX2/FMA are x86-only ISA flags. On any other
+#  host (e.g. AArch64 Linux / Termux) the Makefile automatically
+#  builds the scalar-fallback kernel tier — the supported portable
+#  tier (docs/PLATFORM_SUPPORT.md). No flags need to be passed.
 # ============================================================
 
-UNAME := $(shell uname -s)
+UNAME   := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 
 CC      ?= gcc
 CFLAGS  ?= -Iinclude -O2 -std=c99 -Wall -Wextra -fno-strict-aliasing -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
@@ -24,8 +29,12 @@ LDLIBS  = -lm
 
 # Native language-runtime kernels: AVX2/FMA where the compiler defines them.
 # `make portable` removes them, exercising the scalar fallback paths.
+# A non-x86-64 host (aarch64, arm64, riscv64, ...) cannot take -mavx2/-mfma
+# at all, so it silently gets the scalar tier — identical to `make portable`.
 PORTABLE=0
 ifeq ($(PORTABLE),1)
+  KERNEL_FLAGS =
+else ifeq ($(filter x86_64 amd64,$(UNAME_M)),)
   KERNEL_FLAGS =
 else
   KERNEL_FLAGS = -O3 -mavx2 -mfma
@@ -61,6 +70,8 @@ test: $(OMNICC)
 
 clean:
 	rm -rf bin
+ifeq ($(OS),Windows_NT)
 	del /Q bin\omnicc.exe 2>NUL
+endif
 
 .PHONY: all portable asan windows test clean
