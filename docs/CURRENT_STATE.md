@@ -19,7 +19,7 @@
 | Capability | Evidence |
 |------------|----------|
 | x86-64 native codegen, no LLVM | `src/codegen.c` (~5.3k lines); `omnicc dump` shows real encodings |
-| Win64 **and** SysV AMD64 calling conventions | `include/abi.h`; same 30-test suite green on both platforms in CI |
+| Win64 **and** SysV AMD64 calling conventions | `include/abi.h`; SysV: full suite green in CI. Win64: compiles+links, pure-computation JIT programs pass (7/21), string/module call paths crash (TD-20, scoped V01.01) |
 | JIT execution with W^X | `src/main.c` run path; mmap/mprotect vs VirtualAlloc/VirtualProtect |
 | Standalone builds (engine-embedding) | `OMNISRC1` payload in `src/main.c`; PHASE-31 clean-clone check |
 | 9 built-in modules: time, datetime, math, os, io, sys, list, str, ai | `docs/MODULES.md`; tests t08–t20 |
