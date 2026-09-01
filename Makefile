@@ -24,7 +24,7 @@ UNAME   := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 
 CC      ?= gcc
-CFLAGS  ?= -Iinclude -O2 -std=c99 -Wall -Wextra -fno-strict-aliasing -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
+CFLAGS  ?= -Iinclude -O2 -std=c99 -Wall -Wextra -fno-strict-aliasing -mstackrealign -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
 LDLIBS  = -lm
 
 # Native language-runtime kernels: AVX2/FMA where the compiler defines them.
@@ -52,7 +52,7 @@ portable:
 	@$(MAKE) --no-print-directory PORTABLE=1 $(OMNICC)
 
 asan:
-	@$(MAKE) --no-print-directory CFLAGS="-Iinclude -O1 -g -std=c99 -Wall -Wextra -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -fsanitize=address,undefined -fno-sanitize-recover=all" $(OMNICC)
+	@$(MAKE) --no-print-directory CFLAGS="-Iinclude -O1 -g -std=c99 -Wall -Wextra -mstackrealign -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -fsanitize=address,undefined -fno-sanitize-recover=all" $(OMNICC)
 
 # Kernel flags during sanitizer build (no AVX2 to keep stacks small)
 asan: KERNEL_FLAGS =
