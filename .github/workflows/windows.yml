@@ -33,6 +33,14 @@ jobs:
       - name: Version consistency gate
         run: python tests/check_version.py
 
+      # DIAGNOSTIC (runs even when the gate failed): first-ever Win64 JIT
+      # execution exposed a probe SIGSEGV — collect the full unit-suite
+      # picture in the same round to scope the bug. The job stays red via
+      # the failed gate step; this step only enriches the log.
+      - name: "Diagnostic — unit suite (Win64 JIT health picture)"
+        if: always()
+        run: python tests/run_tests.py --verbose || true
+
       - name: Unit tests (Win64 ABI)
         run: python tests/run_tests.py
 
