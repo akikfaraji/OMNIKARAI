@@ -29,8 +29,14 @@ jobs:
         run: |
           make windows CFLAGS="-Iinclude -O2 -g -std=c99 -Wall -Wextra -fno-strict-aliasing"
 
+      - name: Version consistency gate
+        run: python tests/check_version.py
+
       - name: Unit tests (Win64 ABI)
         run: python tests/run_tests.py
+
+      - name: Regression suite (Win64 ABI)
+        run: python tests/run_regression.py
 
       - name: Stress tests (Win64 ABI)
         run: python tests/run_tests.py --stress

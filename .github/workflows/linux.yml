@@ -7,8 +7,24 @@ on:
     branches: [main]
 
 jobs:
+  preflight:
+    name: secret-scan preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No credential patterns in tree
+        run: |
+          if git grep -nE "github_pat_[A-Za-z0-9_]+|ghp_[A-Za-z0-9]+" -- . ; then
+            echo "SECRET-LIKE PATTERN FOUND — failing preflight"
+            exit 1
+          else
+            echo "clean: no github_pat_ / ghp_ patterns"
+          fi
+
   build-test:
     name: gcc — build + full test suite
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,11 +32,17 @@ jobs:
       - name: Build omnicc
         run: make
 
+      - name: Version consistency gate
+        run: python3 tests/check_version.py
+
       - name: Unit tests (t01–t21)
         run: python3 tests/run_tests.py
 
       - name: Stress tests (stress01–stress09)
         run: python3 tests/run_tests.py --stress
+
+      - name: Regression suite (historical bug classes)
+        run: python3 tests/run_regression.py
 
       - name: Smoke: standalone build
         run: |
@@ -30,6 +52,7 @@ jobs:
 
   sanitizers:
     name: asan+ubsan — build + test suite
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +65,11 @@ jobs:
           export ASAN_OPTIONS=detect_leaks=0
           python3 tests/run_tests.py
 
+      - name: Regression suite under sanitizers
+        run: |
+          export ASAN_OPTIONS=detect_leaks=0
+          python3 tests/run_regression.py
+
       - name: Stress tests under sanitizers
         run: |
           export ASAN_OPTIONS=detect_leaks=0
@@ -49,6 +77,7 @@ jobs:
 
   portable:
     name: no-AVX2 scalar build
+    needs: preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +87,9 @@ jobs:
 
       - name: Unit tests (scalar paths)
         run: python3 tests/run_tests.py
+
+      - name: Regression suite (scalar paths)
+        run: python3 tests/run_regression.py
 
       - name: Stress tests (scalar paths)
         run: python3 tests/run_tests.py --stress
