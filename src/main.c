@@ -240,8 +240,10 @@ static AST_Program* compile_source(const char* source, const char* filename,
 // ── omnicc run ───────────────────────────────────────────────
 /* TEMP DIAGNOSTIC: SIGSEGV handler that reports the faulting PC and address
    so JIT faults can be mapped back to a JIT buffer offset. Enabled when
-   OMNI_JIT_DEBUG=1. Remove once the SysV port is proven stable. */
-#ifndef _WIN32
+   OMNI_JIT_DEBUG=1. Remove once the SysV port is proven stable.
+   x86-64-only: reads REG_RIP from the mcontext; on other architectures
+   the JIT cannot run anyway, so the handler is compiled out. */
+#if !defined(_WIN32) && defined(__x86_64__)
 #define _GNU_SOURCE /* for REG_RIP in ucontext */
 #include <signal.h>
 static volatile void* g_jit_mem = NULL;
@@ -277,7 +279,11 @@ static void omni_jit_sigaction(int sig, siginfo_t* si, void* uctx) {
 void omni_host_set_jit_region(void* mem, size_t sz) {
     g_jit_mem = mem; g_jit_size = sz;
 }
-#endif /* !_WIN32 */
+#else  /* !_WIN32 && __x86_64__ — other hosts: region hook is a no-op */
+void omni_host_set_jit_region(void* mem, size_t sz) {
+    (void)mem; (void)sz;
+}
+#endif /* !(!_WIN32 && __x86_64__) */
 
 /* ── OMNI-E0005 — honest backend/host refusal ────────────────
    The one-pass backend emits native x86-64 machine code (JIT for
@@ -326,6 +332,7 @@ static int cmd_run(const char* filepath) {
         return 1;
     }
     if (getenv("OMNI_JIT_DEBUG")) {
+#if !defined(_WIN32) && defined(__x86_64__)
         struct sigaction sa; memset(&sa, 0, sizeof(sa));
         sa.sa_sigaction = omni_jit_sigaction;
         sa.sa_flags = SA_SIGINFO;
@@ -334,6 +341,7 @@ static int cmd_run(const char* filepath) {
         sigaction(SIGBUS,  &sa, NULL);
         extern void codegen_set_jit_region(void* mem, size_t sz);
         /* region pointer is set inside codegen_run via the weak hook below */
+#endif
     }
     OMNI_LOG("[omnicc] running %zu bytes of native x86-64 code...\n", cg.code.size);
     LARGE_INTEGER t0, t1, freq;

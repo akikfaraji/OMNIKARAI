@@ -5363,7 +5363,9 @@ int64_t codegen_run(CodeGen*cg){
     long rbx_before=0, rbx_after=0;
     int jitdbg = getenv("OMNI_JIT_DEBUG") != NULL;
     if (jitdbg) {
+#if defined(__x86_64__)
         __asm__ volatile("mov %%rbx, %0" : "=r"(rbx_before));
+#endif
         fprintf(stderr,"[jitdbg] before: rbx=%p size=%zu\n",(void*)(uintptr_t)rbx_before,cg->code.size);
         fflush(stderr);
         const char* save = getenv("OMNI_JIT_SAVE");
@@ -5400,8 +5402,10 @@ int64_t codegen_run(CodeGen*cg){
     }
     long rbx_b2=0,r12_b2=0,r13_b2=0,r14_b2=0,r15_b2=0,rbp_b2=0,rsp_b2=0;
     if (jitdbg) {
+#if defined(__x86_64__)
         __asm__ volatile("mov %%rbx,%0\n mov %%r12,%1\n mov %%r13,%2\n mov %%r14,%3\n mov %%r15,%4\n mov %%rbp,%5\n mov %%rsp,%6"
                          : "=r"(rbx_b2),"=r"(r12_b2),"=r"(r13_b2),"=r"(r14_b2),"=r"(r15_b2),"=r"(rbp_b2),"=r"(rsp_b2));
+#endif
         fprintf(stderr,"[jitdbg] pre-call regs: rbx=%p r12=%p r13=%p r14=%p r15=%p rbp=%p rsp=%p\n",
                 (void*)rbx_b2,(void*)r12_b2,(void*)r13_b2,(void*)r14_b2,(void*)r15_b2,(void*)rbp_b2,(void*)rsp_b2);
         fflush(stderr);
@@ -5409,6 +5413,7 @@ int64_t codegen_run(CodeGen*cg){
     typedef int64_t(*OmniEntry)(void);
     int64_t result=((OmniEntry)mem)();
     if (jitdbg) {
+#if defined(__x86_64__)
         long rsp_after=0,rbp_a2=0,r12_a2=0,r13_a2=0,r14_a2=0,r15_a2=0;
         __asm__ volatile("mov %%rsp, %0\n mov %%rbp,%1\n mov %%r12,%2\n mov %%r13,%3\n mov %%r14,%4\n mov %%r15,%5"
                          : "=r"(rsp_after),"=r"(rbp_a2),"=r"(r12_a2),"=r"(r13_a2),"=r"(r14_a2),"=r"(r15_a2));
@@ -5428,6 +5433,11 @@ int64_t codegen_run(CodeGen*cg){
                 fprintf(stderr, "[jitdbg]   [rsp%+#lx] = %p\n", (long)(-8 * (k + 1)),
                         (void*)(uintptr_t)snap[k]);
         }
+#else
+        (void)rbx_after;
+        fprintf(stderr,"[jitdbg] register/stack dump is x86-64-only (this host is not); rax=%lld\n",
+                (long long)result);
+#endif
         fflush(stderr);
         unsigned long sum2=0; for(size_t i=0;i<cg->code.size;i++) sum2=sum2*31+((unsigned char*)mem)[i];
         fprintf(stderr,"[jitdbg] after: buffer_sum=%lx\n",sum2);
