@@ -13,12 +13,27 @@
 import argparse
 import os
 import platform as pyplatform
+import re
 import subprocess
 import sys
 
 HERE     = os.path.dirname(os.path.abspath(__file__))
 ROOT     = os.path.dirname(HERE)
 IS_WIN   = (os.name == "nt")
+
+# ── Version single-sourcing (docs/VERSIONING.md) ─────────────────
+# The runner NEVER hardcodes a version: it parses include/omni_version.h,
+# so a version bump cannot desynchronize the suite.
+def _omni_version():
+    hdr = os.path.join(ROOT, "include", "omni_version.h")
+    with open(hdr, "r", encoding="utf-8") as f:
+        m = re.search(r'#define\s+OMNI_VERSION\s+"([^"]+)"', f.read())
+    if not m:
+        raise SystemExit(f"ERROR: OMNI_VERSION not found in {hdr}")
+    return m.group(1)
+
+OMNI_VERSION = _omni_version()
+
 # Prefer the .exe whenever it exists (MinGW/MSYS2 builds report os.name
 # "posix" but still produce bin/omnicc.exe); fall back to the POSIX name.
 _cand_exe = os.path.join(ROOT, "bin", "omnicc.exe")
@@ -30,9 +45,9 @@ OMNICC    = _cand_exe if os.path.exists(_cand_exe) else _cand_bin
 # They follow the BINARY that was found, not the Python interpreter — an
 # MSYS2 Python on Windows reports os.name "posix" but runs omnicc.exe.
 if OMNICC.endswith(".exe"):
-    OS_NAME, SYS_PLAT, SYS_VER = "windows", "windows-x64", "Omnikarai v7.1.0 (x86-64 Windows)"
+    OS_NAME, SYS_PLAT, SYS_VER = "windows", "windows-x64", f"Omnikarai {OMNI_VERSION} (x86-64 Windows)"
 else:
-    OS_NAME, SYS_PLAT, SYS_VER = "linux", "linux-x64", "Omnikarai v7.1.0 (x86-64 Linux)"
+    OS_NAME, SYS_PLAT, SYS_VER = "linux", "linux-x64", f"Omnikarai {OMNI_VERSION} (x86-64 Linux)"
 
 TESTS = [
     ("t01_core_arithmetic.ok", "Core Arithmetic",      "10,3,13,7,30,3,1,true,true,true,true,true,true"),
@@ -47,7 +62,7 @@ TESTS = [
     ("t10_datetime.ok",        "Datetime module",      "*"),
     ("t11_os.ok",              "OS module",            f"{OS_NAME},*,*,1"),
     ("t12_io.ok",              "IO module",            "1,1,Hello Omnikarai,1,1,0"),
-    ("t13_sys.ok",             "Sys module",           f"{SYS_VER},{SYS_PLAT},7.1.0,64"),
+    ("t13_sys.ok",             "Sys module",           f"{SYS_VER},{SYS_PLAT},{OMNI_VERSION},64"),
     ("t14_list.ok",            "List module",          "0,3,10,20,30,30,2,1,0"),
     ("t15_assert.ok",          "Assert builtin",       "ok,done"),
     ("t16_ai_alloc.ok",        "AI alloc/set/get/free","1065353216,1090519040,0"),

@@ -1,6 +1,7 @@
 // ============================================================
-//  OMNIKARAI Compiler — omnicc  v7.1.0
+//  OMNIKARAI Compiler — omnicc
 //  Windows x64 — No LLVM — No runtime dependency
+//  Version: single-sourced in include/omni_version.h (docs/VERSIONING.md)
 //
 //  Usage:
 //    omnicc run   [--quiet] [--beta] <file.ok>   compile and run (JIT)
@@ -30,6 +31,7 @@
 
 #include "omni_platform.h"   // platform layer (Win32 native / POSIX shims)
 
+#include "omni_version.h"    // single-sourced version (V01 convention)
 #include "lexer.h"
 #include "parser.h"
 #include "ast.h"
@@ -50,12 +52,32 @@ static void print_version(void) {
     const char* plat = "Linux/macOS (POSIX)";
 #endif
     fprintf(stderr,
-        "Omnikarai Compiler (omnicc) v7.1.0\n"
+        "Omnikarai Compiler (omnicc) " OMNI_VERSION "\n"
         "  x86-64 native code | %s | No LLVM | No dependencies\n"
         "  Modules: time, datetime, math, os, io, sys, list, str, ai\n"
         "  Registry: https://opi-nine.vercel.app\n",
         plat
     );
+}
+
+/* Machine-parsable version — one key=value per line, stdout.
+   Schema revision = OMNI_VERSION_MACHINE_SCHEMA (omni_version.h).
+   Contract (docs/DIAGNOSTICS.md): never reorder existing keys;
+   new keys are appended; removal/renames bump the schema. */
+static void print_version_machine(void) {
+#if defined(_WIN32)
+    const char* plat = "windows-x64";
+    const char* abi  = "win64";
+#else
+    const char* plat = "linux-x64";
+    const char* abi  = "sysv";
+#endif
+    printf("schema=%d\n", OMNI_VERSION_MACHINE_SCHEMA);
+    printf("version=%s\n", OMNI_VERSION);
+    printf("platform=%s\n", plat);
+    printf("arch=x86-64\n");
+    printf("abi=%s\n", abi);
+    printf("modules=time,datetime,math,os,io,sys,list,str,ai\n");
 }
 
 // ── Usage ────────────────────────────────────────────────────
@@ -424,6 +446,9 @@ int main(int argc, char** argv) {
     const char* cmd = argv[1];
 
     if (strcmp(cmd, "version") == 0 || strcmp(cmd, "--version") == 0) {
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--machine") == 0) { print_version_machine(); return 0; }
+        }
         print_version(); return 0;
     }
 

@@ -71,6 +71,7 @@
 #include "omni_platform.h"   // platform layer (Win32 native / POSIX shims)
 #include "abi.h"             // calling-convention abstraction
 
+#include "omni_version.h"    // single-sourced version (V01 convention)
 #include "codegen.h"
 #include "ast.h"
 #include "lexer.h"
@@ -551,9 +552,9 @@ __attribute__((noinline)) int64_t omni_io_size(const char* path) {
 // ============================================================
 __attribute__((noinline)) const char* omni_sys_version(void) {
 #if defined(_WIN32)
-    return "Omnikarai v7.1.0 (x86-64 Windows)";
+    return "Omnikarai " OMNI_VERSION " (x86-64 Windows)";
 #else
-    return "Omnikarai v7.1.0 (x86-64 Linux)";
+    return "Omnikarai " OMNI_VERSION " (x86-64 Linux)";
 #endif
 }
 __attribute__((noinline)) const char* omni_sys_platform(void) {
@@ -564,7 +565,7 @@ __attribute__((noinline)) const char* omni_sys_platform(void) {
 #endif
 }
 __attribute__((noinline)) const char* omni_sys_arch(void)      { return "x86_64"; }
-__attribute__((noinline)) const char* omni_sys_omni_ver(void)  { return "7.1.0"; }
+__attribute__((noinline)) const char* omni_sys_omni_ver(void)  { return OMNI_VERSION; }
 __attribute__((noinline)) int64_t     omni_sys_bits(void)      { return 64; }
 
 // ============================================================
