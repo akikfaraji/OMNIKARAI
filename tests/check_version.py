@@ -126,7 +126,9 @@ def main():
                                capture_output=True, text=True, timeout=60)
             lines = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
             if p.returncode != 0 or len(lines) < 2:
-                errors += fail(f"version probe program failed (exit {p.returncode})")
+                tail = (p.stderr or "").strip()[-400:]
+                errors += fail(f"version probe program failed (exit {p.returncode})"
+                               + (f" — stderr tail: {tail!r}" if tail else ""))
             else:
                 if lines[0] != ver:
                     errors += fail(f"sys.omni_ver() = {lines[0]!r}, expected {ver!r}")
