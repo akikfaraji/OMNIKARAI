@@ -29,6 +29,10 @@
 #include <stdint.h>
 #include <time.h>          /* BUG-006 fix: include before windows.h */
 
+#ifndef _WIN32
+#include <sys/utsname.h>   /* OMNI-E0005: host-arch detection (backend refusal) */
+#endif
+
 #include "omni_platform.h"   // platform layer (Win32 native / POSIX shims)
 
 #include "omni_version.h"    // single-sourced version (V01 convention)
@@ -274,6 +278,38 @@ void omni_host_set_jit_region(void* mem, size_t sz) {
     g_jit_mem = mem; g_jit_size = sz;
 }
 #endif /* !_WIN32 */
+
+/* ── OMNI-E0005 — honest backend/host refusal ────────────────
+   The one-pass backend emits native x86-64 machine code (JIT for
+   `run`, engine-embedded standalone for `build`). On any other host
+   the emitted bytes would fault (SIGILL) — a silent, dishonest
+   failure. Instead we refuse cleanly at the command boundary and
+   point at what DOES work here: the diagnostics tier (check /
+   check --json / dump / version), which is architecture-independent.
+   Native AArch64 execution is planned for V01.06 (docs/AARCH64.md);
+   this guard is lifted by that release, not before. */
+static int omni_backend_refuse_if_unsupported(const char* cmd) {
+#if defined(_WIN32)
+    (void)cmd;
+    return 0;   /* x86-64 Windows is the legacy main target; Windows-on-ARM
+                   is not a claimed platform (docs/PLATFORM_SUPPORT.md). */
+#else
+    struct utsname u;
+    if (uname(&u) != 0) return 0;   /* cannot tell — best effort */
+    if (strcmp(u.machine, "x86_64") == 0 || strcmp(u.machine, "amd64") == 0)
+        return 0;
+    fprintf(stderr,
+        "OMNI-E0005 error: '%s' needs the x86-64 code-generation backend, "
+        "but this host is '%s'.\n"
+        "  The backend emits native x86-64 machine code; running it here "
+        "would fault (SIGILL).\n"
+        "  Available on this host: omnicc check, check --json, dump, version "
+        "(diagnostics tier).\n"
+        "  Native execution on this architecture is planned: docs/AARCH64.md "
+        "(V01.06).\n", cmd, u.machine);
+    return 2;
+#endif
+}
 
 static int cmd_run(const char* filepath) {
     char* source = read_file(filepath);
@@ -614,7 +650,11 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    if (strcmp(cmd, "run")   == 0) return cmd_run(filepath);
+    if (strcmp(cmd, "run")   == 0) {
+        int refused = omni_backend_refuse_if_unsupported(cmd);
+        if (refused) return refused;
+        return cmd_run(filepath);
+    }
     if (strcmp(cmd, "dump")  == 0) return cmd_dump(filepath);
     if (strcmp(cmd, "check") == 0) {
         if (check_json) {
@@ -626,7 +666,11 @@ int main(int argc, char** argv) {
         }
         return cmd_check(filepath, check_json);
     }
-    if (strcmp(cmd, "build") == 0) return cmd_build(filepath);
+    if (strcmp(cmd, "build") == 0) {
+        int refused = omni_backend_refuse_if_unsupported(cmd);
+        if (refused) return refused;
+        return cmd_build(filepath);
+    }
 
     fprintf(stderr, "Error: unknown command '%s' (see omnicc --help)\n", cmd);
     return 2;

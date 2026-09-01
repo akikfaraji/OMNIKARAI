@@ -33,7 +33,7 @@ a code never changes meaning and is never reused.
 
 | Range    | Area                    | Assigned codes (v0)                                                                                            |
 |----------|-------------------------|----------------------------------------------------------------------------------------------------------------|
-| `0NNN`   | CLI / usage / IO        | `E0001` unknown command · `E0002` unknown flag · `E0003` missing file argument · `E0004` cannot open source file |
+| `0NNN`   | CLI / usage / IO        | `E0001` unknown command · `E0002` unknown flag · `E0003` missing file argument · `E0004` cannot open source file · `E0005` backend not executable on this host (x86-64 backend refused on a non-x86-64 machine instead of faulting; `run`/`build` exit 2 — the diagnostics tier still works; see [AARCH64.md](AARCH64.md)) |
 | `1NNN`   | lexer                   | reserved (the lexer defers errors to the parser in v0)                                                          |
 | `2NNN`   | parser / syntax         | `E2001` unexpected/missing token · `E2002` expected identifier · `E2003` expected `:` · `E2004` expected indented block · `E2005` unexpected token with no parse rule · `E2099` unclassified syntax error |
 | `3NNN`   | semantic / codegen      | `E3001` name not defined · `E3002` type error · `E3003` value error · `E3099` unclassified semantic error        |
