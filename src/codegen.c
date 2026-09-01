@@ -2261,8 +2261,9 @@ static void cg_integer_literal(CodeGen*cg,AST_Expression_IntegerLiteral*n){eph_i
 static void cg_float_literal(CodeGen*cg,AST_Expression_FloatLiteral*n){
     uint64_t bits;memcpy(&bits,&n->value,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);
     emit_u8(&cg->code,0x66);emit_u8(&cg->code,0x48);emit_u8(&cg->code,0x0F);emit_u8(&cg->code,0x6E);emit_u8(&cg->code,0xC0);
+    eph_invalidate(cg);  /* raw RAX/XMM write — keep tracker sound */
 }
-static void cg_boolean_literal(CodeGen*cg,AST_Expression_Boolean*n){emit_mov_rax_imm64(&cg->code,n->value?1:0);}
+static void cg_boolean_literal(CodeGen*cg,AST_Expression_Boolean*n){emit_mov_rax_imm64(&cg->code,n->value?1:0);eph_invalidate(cg);}
 static void cg_string_literal(CodeGen*cg,AST_Expression_StringLiteral*n){
     size_t len=strlen(n->value)+1;char*copy=(char*)malloc(len);memcpy(copy,n->value,len);
     cg->string_pool=(char**)realloc(cg->string_pool,(cg->string_pool_count+1)*sizeof(char*));
@@ -2339,8 +2340,8 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
         }
     }
     // Short-circuit boolean operators
-    if(strcmp(op,"and")==0){cg_expr(cg,node->left);emit_test_rax(&cg->code);size_t jf=emit_je_fwd(&cg->code);cg_expr(cg,node->right);emit_test_rax(&cg->code);emit_setcc_rax(&cg->code,0x95);size_t jend=emit_jmp_fwd(&cg->code);resolve_fwd(&cg->code,jf);emit_xor_rax_rax(&cg->code);resolve_fwd(&cg->code,jend);return;}
-    if(strcmp(op,"or")==0){cg_expr(cg,node->left);emit_test_rax(&cg->code);size_t jt=emit_jne_fwd(&cg->code);cg_expr(cg,node->right);emit_test_rax(&cg->code);emit_setcc_rax(&cg->code,0x95);size_t jend=emit_jmp_fwd(&cg->code);resolve_fwd(&cg->code,jt);emit_mov_rax_imm64(&cg->code,1);resolve_fwd(&cg->code,jend);return;}
+    if(strcmp(op,"and")==0){cg_expr(cg,node->left);emit_test_rax(&cg->code);size_t jf=emit_je_fwd(&cg->code);cg_expr(cg,node->right);emit_test_rax(&cg->code);emit_setcc_rax(&cg->code,0x95);size_t jend=emit_jmp_fwd(&cg->code);resolve_fwd(&cg->code,jf);emit_xor_rax_rax(&cg->code);resolve_fwd(&cg->code,jend);eph_invalidate(cg);return;}
+    if(strcmp(op,"or")==0){cg_expr(cg,node->left);emit_test_rax(&cg->code);size_t jt=emit_jne_fwd(&cg->code);cg_expr(cg,node->right);emit_test_rax(&cg->code);emit_setcc_rax(&cg->code,0x95);size_t jend=emit_jmp_fwd(&cg->code);resolve_fwd(&cg->code,jt);emit_mov_rax_imm64(&cg->code,1);resolve_fwd(&cg->code,jend);eph_invalidate(cg);return;}
 
     // ── CONSTANT RHS FAST PATHS ──────────────────────────────────────────────
     int rhs_is_const=(node->right&&node->right->type==INTEGER_LITERAL);
@@ -2364,19 +2365,24 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
         else if(strcmp(op,"<=")==0) result=(lhs_const<=rhs_const)?1:0;
         else if(strcmp(op,">=")==0) result=(lhs_const>=rhs_const)?1:0;
         else goto no_fold;
-        emit_mov_rax_imm64(&cg->code,result); return;
+        emit_mov_rax_imm64(&cg->code,result);
+        eph_invalidate(cg);  /* FIX: raw RAX write must not leave a stale
+                                tracked-store — the skipped reload made
+                                '2 + 3 * 4' fold to 24 (rhs used twice) */
+        return;
     }
     no_fold:;
 
     // Const-RHS multiply: use IMUL imm (3 bytes vs 10+3=13 for load+imul)
     if(rhs_is_const && strcmp(op,"*")==0){
-        if(rhs_const==0){emit_xor_rax_rax(&cg->code);return;}  // x*0 = 0
-        if(rhs_const==1){cg_expr(cg,node->left);return;}         // x*1 = x
+        if(rhs_const==0){emit_xor_rax_rax(&cg->code);eph_invalidate(cg);return;}  // x*0 = 0
+        if(rhs_const==1){cg_expr(cg,node->left);eph_invalidate(cg);return;}      // x*1 = x
         cg_expr(cg,node->left);
         // Power-of-2: shift is 1 cycle vs 3 cycles for IMUL
         int k=log2_exact(rhs_const);
         if(k>=1){emit_shl_rax(&cg->code,(uint8_t)k);}
         else    {emit_imul_rax_imm32(&cg->code,(int32_t)rhs_const);}
+        eph_invalidate(cg);
         return;
     }
     /* FIX(N1): const-RHS div/mod fast paths removed. The previous SAR
@@ -2392,6 +2398,7 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
         emit_mov_rcx_imm64(&cg->code,rhs_const);
         if(strcmp(op,"/")==0) emit_idiv_rcx(&cg->code);
         else                  emit_mod_rax_rcx(&cg->code);
+        eph_invalidate(cg);
         return;
     }
     // Const-RHS add/sub: use ADD/SUB rax, imm8/imm32 (shorter, no tmp slot)
@@ -2399,12 +2406,14 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
         cg_expr(cg,node->left);
         if(rhs_const>=-128&&rhs_const<=127){emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x83);emit_u8(&cg->code,0xC0);emit_u8(&cg->code,(uint8_t)(int8_t)rhs_const);}
         else{emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x05);emit_u32(&cg->code,(uint32_t)(int32_t)rhs_const);}
+        eph_invalidate(cg);
         return;
     }
     if(rhs_is_const && strcmp(op,"-")==0){
         cg_expr(cg,node->left);
         if(rhs_const>=-128&&rhs_const<=127){emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x83);emit_u8(&cg->code,0xE8);emit_u8(&cg->code,(uint8_t)(int8_t)rhs_const);}
         else{emit_u8(&cg->code,REX_W);emit_u8(&cg->code,0x2D);emit_u32(&cg->code,(uint32_t)(int32_t)rhs_const);}
+        eph_invalidate(cg);
         return;
     }
 
@@ -2890,9 +2899,9 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
     }
 
     if(strcmp(ns,"math")==0){
-        if(strcmp(method,"pi")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_PI,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);return;}
-        if(strcmp(method,"e")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_E,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);return;}
-        if(strcmp(method,"tau")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_TAU,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);return;}
+        if(strcmp(method,"pi")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_PI,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);eph_invalidate(cg);return;}
+        if(strcmp(method,"e")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_E,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);eph_invalidate(cg);return;}
+        if(strcmp(method,"tau")==0&&argc==0){uint64_t bits;memcpy(&bits,&OMNI_TAU,8);emit_mov_rax_imm64(&cg->code,(int64_t)bits);eph_invalidate(cg);return;}
         if(strcmp(method,"abs")==0&&argc==1){cg_expr(cg,call->arguments[0]);emit_mov_arg0_rax(&cg->code);cg_call_extern(cg,g_fn_math_abs);return;}
         if(strcmp(method,"min")==0&&argc==2){
             int s=cg->scope->next_offset;cg->scope->next_offset+=8;if(s>cg->stack_size)cg->stack_size=s;
