@@ -2232,7 +2232,10 @@ static void cg_inline_call(CodeGen*cg,FnEntry*fe,AST_Expression**args,int argc){
     for(int i=0;i<fd->parameter_count&&i<4;i++){
         Symbol*ps=(Symbol*)calloc(1,sizeof(Symbol));
         strncpy_s(ps->name,sizeof(ps->name),fd->parameters[i]->value,_TRUNCATE);
-        ps->type=OMNI_TYPE_INT;ps->stack_offset=param_slots[i];
+        /* UNKNOWN (not INT): a statically-INT parameter made the string
+           concat path int_to_str() the argument pointer. Same rationale
+           as the fn-definition param define below. */
+        ps->type=OMNI_TYPE_UNKNOWN;ps->stack_offset=param_slots[i];
         unsigned int idx=sym_hash(fd->parameters[i]->value);
         ps->next=mini->buckets[idx];mini->buckets[idx]=ps;
     }
@@ -2366,9 +2369,13 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
             int rslot=cg->scope->next_offset; cg->scope->next_offset+=8;
             if(cg->scope->next_offset>cg->stack_size)cg->stack_size=cg->scope->next_offset;
 
-            /* RHS → double bits into [rslot] (ints converted) */
+            /* RHS → double bits into [rslot]. Anything not statically
+               FLOAT (INT/BOOL/UNKNOWN) is converted numerically — the
+               language's int literals and int params are the common
+               case. A float-typed VALUE held by an untyped parameter
+               is still mistyped (TD-14, honest limitation). */
             cg_expr(cg,node->right);
-            if(flt_rt==OMNI_TYPE_INT||flt_rt==OMNI_TYPE_BOOL){
+            if(flt_rt!=OMNI_TYPE_FLOAT){
                 emit_int_to_float(&cg->code); emit_xmm0_to_rax(&cg->code);
             }
             eph_invalidate(cg);
@@ -2376,7 +2383,7 @@ static void cg_infix(CodeGen*cg,AST_Expression_Infix*node){
 
             /* LHS → double bits into [lslot] */
             cg_expr(cg,node->left);
-            if(flt_lt==OMNI_TYPE_INT||flt_lt==OMNI_TYPE_BOOL){
+            if(flt_lt!=OMNI_TYPE_FLOAT){
                 emit_int_to_float(&cg->code); emit_xmm0_to_rax(&cg->code);
             }
             eph_invalidate(cg);
@@ -4683,6 +4690,26 @@ static void cg_stmt(CodeGen*cg,AST_Statement*stmt){
             // This happens inside method bodies where 'set' is not used
             if(ex&&ex->type==INFIX_EXPRESSION){
                 AST_Expression_Infix*inf=(AST_Expression_Infix*)ex;
+                /* ── plain reassignment: x = e (without 'set') ──
+                   The parser registers bare '=' as a reassignment infix
+                   ("bare reassignment") but codegen only failed with
+                   "unknown operator '='". Honor it: eval rhs, store to the
+                   variable slot (defining it if first seen, matching the
+                   augmented-assign behavior below). */
+                if(!strcmp(inf->operator,"=")&&inf->left&&inf->left->type==IDENTIFIER){
+                    const char*vn=((AST_Expression_Identifier*)inf->left)->value;
+                    Symbol*sym=scope_get(cg->scope,vn);
+                    if(!sym){sym=scope_define(cg->scope,vn,OMNI_TYPE_UNKNOWN);
+                             if(sym->stack_offset>cg->stack_size)cg->stack_size=sym->stack_offset;}
+                    cg_expr(cg,inf->right);
+                    eph_invalidate(cg);
+                    int _pr=-1;
+                    for(int _ri=0;_ri<cg->reg_var_depth&&_ri<7;_ri++)
+                        if(!strcmp(cg->reg_var_names[_ri],vn)){_pr=_ri;break;}
+                    if(_pr>=0){switch(_pr){case 0:emit_u8(&cg->code,0x49);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0xC6);break;case 1:emit_u8(&cg->code,0x49);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0xC7);break;case 2:emit_mov_rbx_rax(&cg->code);break;case 3:emit_mov_r12_rax(&cg->code);break;case 4:emit_mov_r13_rax(&cg->code);break;case 5:emit_mov_rsi_rax(&cg->code);break;case 6:emit_mov_rdi_rax(&cg->code);break;}}
+                    emit_store_rax(&cg->code,sym->stack_offset);
+                    break;
+                }
                 /* ── augmented assignment: x += e, x -= e, etc. ── */
                 /* Desugar: load var, apply op, store back */
                 {
@@ -4999,7 +5026,13 @@ static void cg_fn_body(CodeGen*cg,AST_Statement_FnDef*fn_def){
 
     /* Store parameters from ABI regs into frame at normal offsets */    for(int i=0;i<fn_def->parameter_count;i++){
         const char*pname=fn_def->parameters[i]->value;
-        Symbol*p_sym=scope_define(fn_scope,pname,OMNI_TYPE_INT);
+        /* V01.00 fix: parameters were statically OMNI_TYPE_INT, so a string
+           argument was force-converted with int_to_str inside the callee
+           ("hi " + name printed a pointer). UNKNOWN keeps raw pointer/int
+           bits for value flow; int semantics are preserved (print and
+           arithmetic default to int), while the string-concat path skips
+           the int conversion for UNKNOWN and passes the pointer as-is. */
+        Symbol*p_sym=scope_define(fn_scope,pname,OMNI_TYPE_UNKNOWN);
         if(i==0&&(!strcmp(pname,"self")))cg->self_slot=p_sym->stack_offset;
         if(p_sym->stack_offset>cg->stack_size)cg->stack_size=p_sym->stack_offset;
         /* Store incoming ABI arg registers into frame slots (include/abi.h):
