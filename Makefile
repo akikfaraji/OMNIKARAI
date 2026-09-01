@@ -52,7 +52,7 @@ portable:
 	@$(MAKE) --no-print-directory PORTABLE=1 $(OMNICC)
 
 asan:
-	@$(MAKE) --no-print-directory CFLAGS="-Iinclude -O1 -g -std=c99 -Wall -Wextra -fsanitize=address,undefined -fno-sanitize-recover=all" $(OMNICC)
+	@$(MAKE) --no-print-directory CFLAGS="-Iinclude -O1 -g -std=c99 -Wall -Wextra -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -fsanitize=address,undefined -fno-sanitize-recover=all" $(OMNICC)
 
 # Kernel flags during sanitizer build (no AVX2 to keep stacks small)
 asan: KERNEL_FLAGS =
