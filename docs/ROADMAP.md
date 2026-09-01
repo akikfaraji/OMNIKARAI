@@ -74,7 +74,7 @@ V01.00 ─▶ V01.01 ─▶ V01.02 ─▶ V01.03 ─▶ V01.04 ─▶ V01.05
 
 ---
 
-## V01.00.x — Foundation: versioning & diagnostics v0
+## V01.00.x — Foundation: versioning & diagnostics v0 — **DONE (V01.00.000-beta-01)**
 
 - **Objective.** Make the repo fully self-describing under the new
   versioning convention and take the first AI-native tooling step.
@@ -95,8 +95,19 @@ V01.00 ─▶ V01.01 ─▶ V01.02 ─▶ V01.03 ─▶ V01.04 ─▶ V01.05
 - **Benchmarks.** Unchanged.
 - **Security.** Secret-scan preflight step added to CI (no `github_pat_` /
   `ghp_` patterns in tree).
+- **Status.** SHIPPED as `V01.00.000-beta-01`. Delivered: version
+  single-sourcing + gate; structured diagnostics + `check --json`
+  ([DIAGNOSTICS.md](DIAGNOSTICS.md)); coherent CLI (help, machine
+  version, deterministic exit codes); 13-program regression suite +
+  JSON goldens + standalone/exit-code checks; internal memory funnel
+  with poison-on-free debug; SSE2 float arithmetic; fixes for the
+  const-fold corruption, pinned-register list.push staleness and
+  string-argument corruption discovered by the new suite; CI secret
+  preflight + regression/version lanes. Honest leftovers recorded as
+  TD-08 (fuzzing), TD-13 (typed params), TD-14 (`const` keyword),
+  TD-15 (pinning trigger — V01.11).
 - **Release criteria.** CI green on Linux + Windows; version test proves
-  single-sourcing; docs updated to match.
+  single-sourcing; docs updated to match — all verified for beta-01.
 
 ## V01.01.x — Memory model
 
@@ -315,8 +326,11 @@ Nothing there is committed.
 1. omnip is Windows-only → V01.04.
 2. Standalone builds embed the engine → V01.02.
 3. No optimizer; C/C++ parity UNPROVEN → V01.11.
-4. Text-only diagnostics → V01.00 / V01.09.
+4. ~~Text-only diagnostics~~ → v0 shipped in V01.00; GA → V01.09.
 5. opi has no live E2E test → V01.05.
+6. Untyped parameters; `const` keyword unimplemented → V01.01
+   (TD-13/TD-14).
+7. Pinned-register crash trigger → V01.11 (TD-15).
 
 Full register with severity and status:
 [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md).

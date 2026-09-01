@@ -31,6 +31,7 @@ project is, what actually works today, and the full roadmap. Start here.
 | [LANGUAGE.md](LANGUAGE.md) | Syntax reference: variables, functions, control flow, types, classes |
 | [MODULES.md](MODULES.md) | Built-in modules: `time`, `datetime`, `math`, `os`, `io`, `sys`, `list`, `str`, `ai` |
 | [COMPILER.md](COMPILER.md) | Compiler internals: lexer → parser → codegen → JIT / standalone build |
+| [DIAGNOSTICS.md](DIAGNOSTICS.md) | Diagnostic codes, `check --json` schema (`omnikarai.diag.v0`), exit codes — tooling contract |
 | [MEMORY_MODEL.md](MEMORY_MODEL.md) | Dual memory model: design requirements (syntax deliberately undecided) |
 | [ABI.md](ABI.md) | Win64 + SysV calling conventions, payload format, package-ABI plan |
 
@@ -72,11 +73,12 @@ project is, what actually works today, and the full roadmap. Start here.
 - **"Is this secure?"** → [SECURITY.md](SECURITY.md) → [PACKAGE_SECURITY.md](PACKAGE_SECURITY.md)
 - **"How fast is it?"** → [BENCHMARKS.md](BENCHMARKS.md) (honest answer: BENCHMARKED for kernel-scale work, UNPROVEN vs -O2 C overall)
 
-## Status summary (legacy v7.1.0, next: V01.00.000-beta-01)
+## Status summary (current: V01.00.000-beta-01)
 
 - **Platforms:** Linux x86-64 (primary CI) and Windows x64 (MinGW CI).
-- **Tests:** 21 unit + 9 stress tests, all passing; the same suite runs on
-  Windows CI under the Win64 calling convention.
+- **Tests:** 21 unit + 9 stress + 13 regression programs + JSON diagnostics
+  goldens + a version-consistency gate — all passing on every CI lane
+  (gcc, ASan+UBSan, no-AVX2 portable, Win64 MinGW).
 - **AI kernels:** AVX2 FP32 and INT8 quantized primitives emitted as
   native machine code, scalar fallbacks (`make portable`).
 - **Known limitations** are stated in [CURRENT_STATE.md](CURRENT_STATE.md)

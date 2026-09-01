@@ -1,11 +1,83 @@
-# Omnikarai Stabilization Progress — v7.1.0
+# Omnikarai Progress
 
-This file records what changed between the last pre-stabilization commit
-(`877e18f "Bugfix -23"`, 2026-05-25) and the v7.1.0 release candidate.
-The engineering-level audit log with per-finding evidence is
-`docs_internal/FINDINGS.md`.
+This file records what changed between releases. The first section
+covers the V01 generation; the engineering-level audit log for the
+legacy stabilization is in `docs_internal/FINDINGS.md`.
 
-## Security & trust
+## V01.00.000-beta-01 — Foundation: versioning & diagnostics v0
+
+Versioning & CLI
+
+- Version single-sourced in `include/omni_version.h` (`OMNI_VERSION`);
+  `sys.omni_ver()`, `sys.version()`, the CLI banner and `omnikarai.toml`
+  all derive from it; `tests/check_version.py` gate runs in `make test`
+  and CI (closes TD-07). Adopted the FRAZIYM `VXX.YY.ZZZ-beta-NN`
+  convention; the legacy `7.1.0` line is history-only.
+- `omnicc version --machine`: stable key=value output for tooling.
+- `omnicc --help/-h/help` to stdout (exit 0); deterministic exit codes
+  (0 ok / 1 diagnostics / 2 usage-IO); unknown `--flags` rejected
+  instead of being treated as file names (closes TD-17).
+
+Diagnostics v0 (docs/DIAGNOSTICS.md is the tooling contract)
+
+- Structured model (severity, stable code, message, file, line, column,
+  span, hint) with code registry `OMNI-<S><NNNN>` (0xxx CLI, 2xxx
+  parser, 3xxx semantic, 9xxx internal).
+- `omnicc check --json`: `omnikarai.diag.v0` document on stdout —
+  golden-tested; runs full parse+codegen validation; one document per
+  run on every termination path.
+- Human text output now carries file/line/caret with readable messages
+  ("expected ':' but found identifier 'x'"); internal token debug only
+  behind --beta.
+
+Compiler correctness (found by the new regression suite; all
+pre-existing at the pre-V01 tag)
+
+- Const-fold operand corruption: `2 + 3 * 4` compiled to 24. Root
+  cause: missing ephemeral-tracker invalidation after raw RAX writes
+  (fold path, const-RHS fast paths, literals, math constants) let a
+  tracked reload be skipped (closes TD-16).
+- Float arithmetic: `+ - * /` and comparisons on float operands now
+  compile to SSE2 double code (were integer ALU ops over double bits);
+  `infer_type` propagates FLOAT to print/args/returns; `%`/`**` on
+  floats are loud type errors.
+- String arguments into functions were corrupted by int_to_str on the
+  pointer: parameters are no longer statically INT (typing itself is
+  TD-13, V01.01).
+- Bare `name = value` reassignment parsed but failed codegen with
+  "unknown operator '='": now desugared like augmented assignment.
+- list.push now syncs the realloc-moved pointer to pinned registers
+  (stale-register crash class; full trigger recorded as TD-15).
+
+Memory foundation (docs/MEMORY_MODEL.md)
+
+- Internal runtime allocation funnel `omni_mem_*` (lists, AI buffers,
+  int8, instances) with live counters and `OMNI_MEM_DEBUG=1`
+  poison-on-free; allocator hooks (arena/pool) are the V01.01 step.
+  No public memory syntax was invented.
+
+Testing & CI
+
+- Permanent regression suite: 13 programs (inline return, const-fold
+  torture, signed div/mod, float literals/args/returns, ABI arg order,
+  loop register preservation, INT8 API, string inference, shims,
+  standalone build, exit codes incl. `sys.exit(7)`) + JSON diagnostics
+  goldens; output AND exit status asserted.
+- CI: secret-scan preflight job; version gate; regression lanes on
+  gcc, ASan+UBSan, no-AVX2 portable and Win64 MinGW.
+
+Known leftovers (honest): no fuzzing (TD-08); untyped parameters
+(TD-13); `const` unimplemented (TD-14, docs corrected); pinned-register
+crash trigger still reachable (TD-15, V01.11).
+
+---
+
+## Legacy: v7.1.0 stabilization (877e18f → da13c15)
+
+The previous section boundary is preserved below.
+
+
+### Security & trust
 
 - MIT LICENSE added; third-party notices documented (previously unlicensed).
 - Package registry auth fails secure: hardcoded `opi-dev-secret` JWT

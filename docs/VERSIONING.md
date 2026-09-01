@@ -42,19 +42,23 @@ VXX.YY.ZZZ-beta-NN
 5. **Single source of truth.** The version must be bumped **atomically** in
    all the places listed below, in the same commit.
 
-## Where the version lives (currently)
+## Where the version lives (single-sourced since V01.00.000-beta-01)
 
-| Location | What it is today (v7.1.0) |
-|----------|---------------------------|
-| `src/codegen.c` — `omni_sys_omni_ver()` | returns `"7.1.0"` to programs via the `sys` module |
-| `src/codegen.c` — platform banner | `"Omnikarai v7.1.0 (x86-64 Linux)"` / `"...(x86-64 Windows)"` |
-| `src/main.c` — CLI banner | `omnicc v7.1.0` |
-| `omnikarai.toml` | project metadata (`version = "7.1.0"`) |
-| `tests/run_tests.py` | asserts the `sys.version` output of compiled tests |
+The single source of truth is **`include/omni_version.h`**
+(`OMNI_VERSION`). Everything else derives from it:
 
-Because `tests/run_tests.py` asserts version output, bumping the version
-without updating the runner fails CI — this coupling is deliberate and
-stays until a version self-check replaces it.
+| Location | How it stays consistent |
+|----------|--------------------------|
+| `src/main.c` — CLI banner, `omnicc version [--machine]` | includes the header |
+| `src/codegen.c` — `sys.omni_ver()` / `sys.version()` banners | includes the header |
+| `omnikarai.toml` — `version` mirror | no preprocessor here; enforced by the gate |
+| `tests/run_tests.py` — expected `sys.version` output | parses the header at runtime |
+| `tests/check_version.py` — release gate | fails on any drift (toml mirror, stale hardcoded strings in `src/`/`include/`, CLI output, `sys` module output); runs in `make test` + CI |
+
+Banner format: `"Omnikarai <OMNI_VERSION> (x86-64 Linux|Windows)"`.
+The lowercase-`v` prefix is reserved for git tags (`vV01.00.000-beta-01`).
+Bump procedure: change `OMNI_VERSION` **and** the toml mirror in the same
+commit; the gate catches anything else that drifted.
 
 ## Mapping from legacy versions
 

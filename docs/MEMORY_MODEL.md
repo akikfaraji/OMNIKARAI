@@ -25,10 +25,16 @@ for the other, and the two modes must coexist in one program.
 | GC | **none** | by design; no pause unpredictability |
 | User pointers/refs | **none exposed** | grammar has no pointer types |
 | Manual alloc for general objects | **none** | only the `ai` module allocates |
+| Internal allocation funnel | **V01.00**: all runtime allocations flow through `omni_mem_*` (counters + `OMNI_MEM_DEBUG=1` poison-on-free); compiler internals deliberately separate | `include/omni_mem.h`, `src/omni_mem.c`; r13 regression |
 
 So today Omnikarai sits at the "beginner-friendly" end by *default
 behavior*, with raw-but-safe-ish byte-level control available only inside
 AI buffers. The dual model below generalizes that into a coherent design.
+
+> V01.00 note: the funnel above is plumbing, not the public API. The
+> V01.01 step is allocator hooks (arena/pool) behind `omni_mem_*` and
+> the reviewed expert surface — no public memory syntax was invented
+> in V01.00, by design ([ROADMAP.md](ROADMAP.md)).
 
 ## The dual model — requirements
 

@@ -1,6 +1,7 @@
 # Current State — evidence-based
 
-> Last verified against the tree at tag `v7.1.0-rc` (commit `da13c15`).
+> Last verified against the tree at `V01.00.000-beta-01` (the release
+> commit of this version).
 > Every claim below cites its evidence: file, test or workflow. If a claim
 > cannot cite evidence, it does not belong in this document. Companion
 > documents: [TECHNICAL_DEBT.md](TECHNICAL_DEBT.md) (problems),
@@ -8,10 +9,10 @@
 
 ## Version
 
-- Legacy version string `7.1.0`, tag `v7.1.0-rc`
-  (`src/codegen.c`, `src/main.c`, `omnikarai.toml`).
-- **Next planned version:** `V01.00.000-beta-01` under the convention in
-  [VERSIONING.md](VERSIONING.md).
+- **Current version:** `V01.00.000-beta-01` under the convention in
+  [VERSIONING.md](VERSIONING.md); single-sourced in
+  `include/omni_version.h`, enforced by `tests/check_version.py`.
+- Legacy baseline: `7.1.0` / tag `v7.1.0-rc` (history preserved).
 
 ## WORKING (verified by tests/CI in this tree)
 
@@ -29,6 +30,11 @@
 | omnip client v6.0.0: publish/install, RECORD-based clean uninstall | `omnip/src/omnip.c` (853 lines) — **Windows-only**, see PARTIALLY |
 | Portable test suite: 21 unit + 9 stress, 30/30 green | `tests/run_tests.py`; CI |
 | CI on Linux (gcc, ASan+UBSan, portable) and Windows (MinGW) | `.github/workflows/linux.yml`, `windows.yml` |
+| Structured diagnostics + `check --json` (`omnikarai.diag.v0`) | `include/omni_diag.h`, `src/diag.c`; golden tests in `tests/run_regression.py` |
+| Version single-sourcing + consistency gate | `include/omni_version.h`; `tests/check_version.py` in `make test` + CI |
+| Permanent regression suite (13 programs + JSON goldens + standalone + exit codes) | `tests/run_regression.py`; CI lanes incl. ASan+UBSan |
+| Internal runtime allocation funnel (lists/AI/int8/instances) with counters + `OMNI_MEM_DEBUG=1` poison-on-free | `include/omni_mem.h`, `src/omni_mem.c`; r13 regression |
+| SSE2 double arithmetic for float operands; ordered float comparisons | `src/codegen.c` float path; r04 regression |
 | Reproducible benchmark runner, multi-language (C/C++/Go/Java/JS/Python) | `benchmarks/run_benchmarks.py` |
 | MIT license + third-party notices | `LICENSE`, `THIRD-PARTY-NOTICES.md` |
 | Honest documentation set | `docs/` (5 docs + index) |
@@ -80,16 +86,22 @@ benchmark lab (V01.11). See [ROADMAP.md](ROADMAP.md).
 4. The fail-secure opi auth posture.
 5. The full git history, including pre-stabilization — tags are permanent.
 6. The `omnicc` CLI shape (`run/build/dump/check/version`) — tools and
-   scripts depend on it.
+   scripts depend on it; V01.00 only *added* (`--json`, `--help`,
+   `version --machine`) and made exit codes deterministic (0 ok /
+   1 diagnostics / 2 usage-IO — see [DIAGNOSTICS.md](DIAGNOSTICS.md)).
 
 ## WHAT SHOULD BE REPLACED (explicitly)
 
 1. Engine-embedding standalone builds → native emitters (V01.02).
 2. Windows-only omnip → portable client (V01.04).
 3. Loop-pinning-only register strategy → real allocation (V01.11).
-4. Ad-hoc version constants scattered in four files → single-sourced
-   version (V01.00).
-5. Text-only diagnostics → structured diagnostics (V01.00/V01.09).
+4. ~~Ad-hoc version constants scattered in four files~~ → single-sourced
+   version header + consistency gate (V01.00, DONE).
+5. ~~Text-only diagnostics~~ → structured diagnostics + `check --json`
+   (v0 shipped in V01.00; GA with LSP-grade codes in V01.09).
+6. ~~Integer-only float arithmetic~~ → SSE2 double path (V01.00, DONE).
+7. Untyped parameters (string/float pass-through typing) →
+   typed-parameters design (TD-13, V01.01).
 
 ## Audit-method note
 

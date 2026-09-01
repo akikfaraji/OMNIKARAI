@@ -45,7 +45,15 @@ Key subsystems:
   wrong corrupts the JIT host (a real bug class found and fixed during the
   Linux port — see FINDINGS.md N6).
 - **Ephemeral pass**: store→load pair elimination for stack slots,
-  including MOV-on-load when the value is still in RAX.
+  including MOV-on-load when the value is still in RAX. Every raw
+  RAX-writing emitter must invalidate the tracker; a missing
+  invalidation in the constant-fold path once made `2 + 3 * 4`
+  compile to `24` (fixed and regression-pinned in V01.00, TD-16).
+- **Float arithmetic (SSE2)**: when either operand is statically
+  float, `+ - * /` compile to ADDSD/SUBSD/MULSD/DIVSD over
+  stack-staged doubles, and comparisons to ordered UCOMISD+setcc
+  sequences; `infer_type` propagates FLOAT so print/args/returns use
+  the double conventions. `%`/`**` on floats are loud TypeErrors.
 - **AVX2 AI kernels**: `math`/`ai` operations emit VFMADD231PS, VPMADDUBSW
   (INT8 dot products), VMAXPS (ReLU) and fused softmax/layernorm sequences
   directly as machine code, with scalar fallbacks compiled in for
@@ -61,10 +69,34 @@ Key subsystems:
   execution (mmap/mprotect on POSIX, VirtualAlloc/VirtualProtect on
   Windows), and unmapped after the run.
 
+## Diagnostics (`include/omni_diag.h`, `src/diag.c`)
+
+Since V01.00, parse and codegen errors are structured diagnostics with
+stable codes (`OMNI-E2NNN` syntax, `OMNI-E3NNN` semantic), file/line/
+column from the current token, optional hints, and two renderers: human
+text with a caret and the `omnikarai.diag.v0` JSON document
+(`omnicc check --json`; schema and code registry:
+[DIAGNOSTICS.md](DIAGNOSTICS.md)). Codegen error paths terminate via
+`exit(1)`; in JSON mode the CLI registers an atexit flush so exactly one
+JSON document is printed on every termination path. The parser keeps a
+legacy plain-string error array in sync for compatibility.
+
+## Memory funnel (`include/omni_mem.h`, `src/omni_mem.c`)
+
+All RUNTIME allocations (lists, AI/tensor buffers, class instances)
+flow through `omni_mem_*` since V01.00 — with live counters and an
+`OMNI_MEM_DEBUG=1` poison-on-free mode — deliberately separate from
+compiler-internal allocations (AST, scopes, code buffers, string pool),
+which stay on plain malloc. Allocator hooks (arena/pool) land in V01.01
+behind these functions. See [MEMORY_MODEL.md](MEMORY_MODEL.md).
+
 ## main.c (~600 lines)
 
 CLI driver with five commands: `run` (JIT), `build` (standalone executable),
 `dump` (hex dump of generated code), `check` (parse + check), `version`.
+V01.00 additions: `check --json`, `version --machine`, `--help`, and the
+deterministic exit-code table (0 ok / 1 diagnostics / 2 usage-IO).
+See [DIAGNOSTICS.md](DIAGNOSTICS.md).
 
 ### Standalone builds
 

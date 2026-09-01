@@ -36,6 +36,15 @@ print("n = " + 5)        # n = 5
 `/` and `%` follow C truncation semantics for negative operands:
 `-7 / 4 == -1`, `-7 % 4 == -3`.
 
+Floats: since V01.00.000-beta-01, `+ - * /` and the comparisons on
+float operands compile to real double arithmetic (SSE2); printing
+uses `%.6g` (`30.0 / 7.0` prints `4.28571`). `%` and `**` on floats
+are compile-time type errors — use the `math` module.
+
+Reassignment: `set` declares and assigns. A bare `name = value`
+statement is also accepted and reassigns the existing (or defines a
+new) variable.
+
 ## Control flow
 
 ```
@@ -116,13 +125,13 @@ use str
 
 See [MODULES.md](MODULES.md) for the full module reference.
 
-## The `const` keyword
+## `const` (NOT implemented — honest status)
 
-```
-const LIMIT = 100
-```
-
-Compile-time integer constants are folded into the generated code.
+The `const` keyword is accepted by the lexer but the parser has no
+statement for it: `const LIMIT = 100` fails to parse today. It is
+tracked as TD-14 and planned with the V01.01 grammar review; this
+reference previously described it as working, which was wrong and is
+corrected here ([TECHNICAL_DEBT.md](TECHNICAL_DEBT.md)).
 
 ## Classes (objects)
 
