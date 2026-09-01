@@ -1,6 +1,13 @@
-# AArch64 Port Plan (PLANNED — V01.06)
+# AArch64 Port Plan (PLANNED — V01.06; diagnostics tier LIVE since V01.00.000-beta-02)
 
-> Status: **PLANNED**. Nothing in this document exists in the tree yet.
+> Status: **native execution PLANNED** for V01.06. What exists TODAY:
+> the compiler builds natively on AArch64 (scalar kernel tier is
+> auto-selected by the Makefile), the diagnostics tier works
+> (`check`, `check --json`, `dump`, `version`), the test suites tier
+> honestly (codegen tests SKIP with a reason; JSON diagnostics goldens
+> run), a native arm64 CI lane runs on every push, and `run`/`build`
+> refuse with `OMNI-E0005` instead of faulting with SIGILL.
+> Termux quickstart: [BUILDING.md](BUILDING.md).
 > Roadmap placement and rationale: [ROADMAP.md](ROADMAP.md) V01.06.
 > Prerequisite: the native ELF64 emitter machinery from V01.02, refactored
 > to be architecture-agnostic.

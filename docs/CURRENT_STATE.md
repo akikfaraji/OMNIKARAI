@@ -1,6 +1,6 @@
 # Current State — evidence-based
 
-> Last verified against the tree at `V01.00.000-beta-01` (the release
+> Last verified against the tree at `V01.00.000-beta-02` (the release
 > commit of this version).
 > Every claim below cites its evidence: file, test or workflow. If a claim
 > cannot cite evidence, it does not belong in this document. Companion
@@ -9,7 +9,7 @@
 
 ## Version
 
-- **Current version:** `V01.00.000-beta-01` under the convention in
+- **Current version:** `V01.00.000-beta-02` under the convention in
   [VERSIONING.md](VERSIONING.md); single-sourced in
   `include/omni_version.h`, enforced by `tests/check_version.py`.
 - Legacy baseline: `7.1.0` / tag `v7.1.0-rc` (history preserved).
@@ -47,7 +47,7 @@
 | Standalone executables | run on any same-platform machine | true freestanding binaries (engine embedded, source travels inside the file) | `src/main.c` payload layout |
 | opi | core publish/list/auth flow | live E2E test, mirrors, private registries, signatures | `opi/api/`; debt register |
 | Benchmarks | time measurements across 6 languages | peak memory, allocations, startup, binary size, SIMD-utilization metrics | `benchmarks/` |
-| Platform layer | Linux + Windows x86-64 | macOS untested (POSIX port targeted Linux); AArch64 not started | `include/omni_platform.h`; CI matrix |
+| Platform layer | Linux + Windows x86-64; AArch64 **diagnostics tier** (build + `check --json` + honest `OMNI-E0005` refusal for `run`/`build`) | macOS untested; native AArch64 = V01.06 | `include/omni_platform.h`; CI matrix incl. arm64 lane |
 
 ## EXPERIMENTAL
 

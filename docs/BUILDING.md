@@ -32,6 +32,32 @@ Build and run a program:
 ./hello.exe                    # runs anywhere on the same platform
 ```
 
+## Android / Termux (AArch64) — diagnostics tier
+
+The compiler is portable C99 and builds natively in Termux. The backend
+currently emits **x86-64 machine code**, so on AArch64 the *diagnostics
+tier* is what works today (`omnicc check`, `check --json`, `dump`,
+`version`); `run`/`build` refuse cleanly with `OMNI-E0005` (exit 2)
+instead of faulting. Native AArch64 execution is planned for V01.06
+([AARCH64.md](AARCH64.md)). The build automatically selects the scalar
+kernel tier — no special flags needed.
+
+```
+pkg install clang make python git
+git clone https://github.com/akikfaraji/OMNIKARAI.git
+cd OMNIKARAI
+make                            # builds bin/omnicc (scalar kernels)
+printf 'set x = 41\nprint(x + 1)\n' > hello.ok
+./bin/omnicc check --json hello.ok   # machine-readable diagnostics
+python3 tests/run_tests.py      # codegen tests report SKIP with reason
+python3 tests/run_regression.py # JSON diagnostics goldens run; programs skip
+python3 tests/check_version.py  # version consistency gate
+```
+
+Expected honest result in Termux: build OK; `check --json` goldens and
+the version gate PASS; every output-asserting test reports **[SKIP]**
+with its reason — nothing is counted as a pass that did not run.
+
 ## Windows
 
 Build with MinGW-w64 (MSYS2):

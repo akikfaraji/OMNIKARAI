@@ -12,7 +12,7 @@
 | Linux | x86-64 | **supported** (primary) | SysV AMD64 | gcc / clang, C99 | CI `linux.yml`; 30/30 tests |
 | Windows | x86-64 | **supported** | Win64 | MinGW-w64 gcc | CI `windows.yml` |
 | macOS | x86-64 / arm64 | **untested** — not claimed | (POSIX path exists, unverified) | — | no CI lane; deliberately not labeled supported |
-| Android/Termux | AArch64 | **planned** (V01.06) | AAPCS64 | Termux clang | [AARCH64.md](AARCH64.md) |
+| Android/Termux | AArch64 | **diagnostics tier** (V01.00.x) — native planned (V01.06) | AAPCS64 (planned) | Termux clang | CI `linux.yml` arm64 lane; build + `check --json` + version gate green, `run`/`build` refuse with `OMNI-E0005`; [AARCH64.md](AARCH64.md), [BUILDING.md](BUILDING.md) |
 
 ## SIMD tiers (TODAY)
 
