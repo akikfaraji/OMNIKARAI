@@ -1,0 +1,7 @@
+# REGRESSION r10 — deterministic exit codes and causal execution
+# A program's observable behavior includes its process exit status:
+# stdout order and the exit code are asserted together.
+# Expected: before 42
+print("before")
+set x = 21 * 2
+print(x)

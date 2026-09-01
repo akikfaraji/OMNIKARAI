@@ -1,0 +1,32 @@
+# REGRESSION r07 — INT8 API boundaries and dot product (finding #16)
+# Historical bug: ai.set stored FP32 bits, so INT8 buffers could not be
+# populated; ai.set_i8/set_u8/get_i8/get_u8 were added for it.
+# Expected: 255 128 0 1 127 -128 -1 36 done
+use ai
+set a = ai.alloc(8)
+set b = ai.alloc(8)
+ai.set_u8(a, 0, 255)
+ai.set_u8(a, 1, 128)
+ai.set_u8(a, 2, 0)
+ai.set_u8(a, 3, 1)
+print(ai.get_u8(a, 0))
+print(ai.get_u8(a, 1))
+print(ai.get_u8(a, 2))
+print(ai.get_u8(a, 3))
+ai.set_i8(b, 0, 127)
+ai.set_i8(b, 1, -128)
+ai.set_i8(b, 2, -1)
+print(ai.get_i8(b, 0))
+print(ai.get_i8(b, 1))
+print(ai.get_i8(b, 2))
+set c = ai.alloc(8)
+set d = ai.alloc(8)
+for i in range(8):
+    ai.set_u8(c, i, i + 1)
+    ai.set_i8(d, i, 1)
+print(ai.dot_i8(c, d, 8))
+ai.free(a)
+ai.free(b)
+ai.free(c)
+ai.free(d)
+print("done")

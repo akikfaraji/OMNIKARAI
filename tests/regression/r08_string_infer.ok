@@ -1,0 +1,23 @@
+# REGRESSION r08 — string return-type inference
+# Historical bug: functions returning strings printed pointers unless
+# return-type inference carried STR through calls and branches.
+# String pass-through parameters (fn id(s): return s) are NOT here:
+# parameter typing does not exist yet (TD-14) — that shape is
+# untypeable today and is tested the other way around in r01/r05.
+# Expected: hi omni pos nonpos direct hi x! 6
+fn greet(name):
+    return "hi " + name
+print(greet("omni"))
+fn branchy(n):
+    if n > 0:
+        return "pos"
+    return "nonpos"
+print(branchy(5))
+print(branchy(-1))
+fn wrap(s):
+    return s
+set w = "direct"
+print(w)
+set m = greet("x") + "!"
+print(m)
+print(len(greet("abc")))

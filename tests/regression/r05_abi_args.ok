@@ -1,0 +1,26 @@
+# REGRESSION r05 — argument passing (SysV AMD64 / Win64)
+# Historical bug: print arg0 landed in RCX (Win64-ism) so the first
+# argument of every call was garbage on SysV. Pins 1-4 argument
+# order, nesting and mixed return types.
+# Expected: 7 -3 10 100 7891 Hello, Omnikarai! 21 10
+fn add2(a, b):
+    return a + b
+fn add4(a, b, c, d):
+    return a + b + c + d
+fn mix4(a, b, c, d):
+    return a * 1000 + b * 100 + c * 10 + d
+print(add2(3, 4))
+print(add2(-5, 2))
+print(add4(1, 2, 3, 4))
+print(add4(10, 20, 30, 40))
+print(mix4(7, 8, 9, 1))
+fn greet(name, word):
+    return word + ", " + name + "!"
+print(greet("Omnikarai", "Hello"))
+fn pair(a, b):
+    set t = a
+    a = b
+    b = t
+    return a * 10 + b
+print(pair(1, 2))
+print(add2(add2(1, 2), add2(3, 4)))

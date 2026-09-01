@@ -1,0 +1,6 @@
+# REGRESSION r11 — sys.exit propagates the process exit code
+# Expected (stdout): quitting
+# Expected (exit code): 7
+print("quitting")
+use sys
+sys.exit(7)

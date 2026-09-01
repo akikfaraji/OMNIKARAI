@@ -1,0 +1,15 @@
+# REGRESSION r09 — string runtime shims under load
+# Historical bug: ASan found an OOB read in the strncpy_s shim used by
+# runtime string helpers (fixed in 3c88ece). These operations funnel
+# through the shim layer; the ASan CI lane is the memory-safety gate,
+# this test pins observable behavior of the verified str API.
+# Expected: HELLO, WORLD hello, world 12 dlroW ,olleH hey, World 1 Hello
+use str
+set s = "Hello, World"
+print(str.upper(s))
+print(str.lower(s))
+print(len(s))
+print(str.reverse(s))
+print(str.replace(s, "Hello", "hey"))
+print(str.contains(s, "W"))
+print(str.slice(s, 0, 5))

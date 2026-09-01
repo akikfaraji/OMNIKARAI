@@ -1,0 +1,23 @@
+# REGRESSION r01 — inlined early-return must not escape the function
+# Historical bug: an inlined "if cond: return X / return Y" emitted a
+# physical RET that escaped the enclosing code stream (stress03 class).
+# Covered here: callee inlined at call sites (pick), callee NOT inlined
+# because it calls another function (wrap), called from top level and
+# from inside another function. Int/bool values keep the focus on the
+# control flow; string pass-through params are a known typing gap
+# (TECHNICAL_DEBT TD-14).
+# Expected: 1 2 10 20 1 0
+fn pick(cond, x, y):
+    if cond:
+        return x
+    return y
+
+fn wrap(cond, x, y):
+    return pick(cond, x, y)
+
+print(pick(true, 1, 2))
+print(pick(false, 1, 2))
+print(wrap(true, 10, 20))
+print(wrap(false, 10, 20))
+print(pick(1 > 0, true, false))
+print(pick(0 > 1, true, false))

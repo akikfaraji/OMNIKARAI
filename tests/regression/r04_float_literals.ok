@@ -1,0 +1,29 @@
+# REGRESSION r04 — float literals, arithmetic, args, returns, printing
+# Historical bug: float infix arithmetic ran on integer ALU ops over
+# double bit patterns (2.5 + 2.5 printed -9221120237041090560); fixed
+# by the SSE2 double path. %.6g printing is the display contract.
+# Parameter typing is a known gap (TD-14): a float param would lose
+# its type, so the float divide below uses an int argument (converted).
+# Expected: 3.14 5 1.5 4 3 4.28571 0.333333 2.5 -0.75 4.5 3.14159 2 3 true true
+print(3.14)
+print(2.5 + 2.5)
+set x = 1.5
+print(x)
+print(x + 2.5)
+print(x * 2.0)
+print(30.0 / 7.0)
+print(1.0 / 3.0)
+set y = x + 1.0
+print(y)
+print(0.5 - 1.25)
+fn half(v):
+    return v / 2.0
+print(half(9))
+fn pi():
+    return 3.14159
+print(pi())
+use math
+print(math.sqrt(4.0))
+print(math.floor(3.7))
+print(2.0 == 2.0)
+print(3.5 > 3.0)

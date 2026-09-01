@@ -57,6 +57,7 @@ windows:
 test: $(OMNICC)
 	python3 tests/run_tests.py
 	python3 tests/check_version.py
+	python3 tests/run_regression.py
 
 clean:
 	rm -rf bin

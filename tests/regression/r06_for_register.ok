@@ -1,0 +1,39 @@
+# REGRESSION r06 — for-loop register preservation
+# Historical bug: the pinned-register save was emitted INSIDE the loop
+# body, so iteration 2 overwrote the caller's saved register (JIT host
+# SIGSEGV class). Loops here pin hot variables and survive calls,
+# continue/break and nesting.
+# Expected: 10 103 19 18 12 6 4
+set total = 0
+for i in range(5):
+    set total = total + i
+print(total)
+set outer = 100
+for i in range(3):
+    set outer = outer + i
+print(outer)
+for i in range(3):
+    for j in range(3):
+        set total = total + 1
+print(total)
+set vals = 0
+for i in range(10):
+    if i == 3:
+        continue
+    if i == 7:
+        break
+    set vals = vals + i
+print(vals)
+fn twice(n):
+    return n * 2
+set acc = 0
+for i in range(4):
+    set acc = acc + twice(i)
+print(acc)
+set a = 1
+set b = 2
+for i in range(2):
+    set a = a + b
+    set b = b + 1
+print(a)
+print(b)

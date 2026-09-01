@@ -1,0 +1,29 @@
+# REGRESSION r02 — constant folding and operator precedence
+# Historical bug: the ephemeral-load skip made spilled LHS reads reuse
+# the folded RHS value: 2 + 3 * 4 compiled to 24 (= 12 + 12), not 14.
+# Every shape below once produced a wrong result somewhere.
+# NOTE: the documented `const` keyword is NOT implemented (TD-15) and
+# is therefore absent here on purpose.
+# Expected: 14 14 11 10 4 10 11 7 3 20 83 24 21 24 21 16 11 11
+print(2 + 3 * 4)
+set a = 2 + 3 * 4
+print(a)
+print(5 + 2 * 3)
+print(2 * 3 + 4)
+print(10 - 2 * 3)
+print(4 + 2 * 3)
+print(1 + 2 * 3 + 4)
+print(20 / 4 + 2)
+print(20 / (4 + 2))
+print((2 + 3) * 4)
+print(100 - 10 - 5 - 2)
+print(2 * 3 * 4)
+print(3 + 4 * 5 - 2)
+set b = (8 - 2) * (3 + 1)
+print(b)
+set K = 7
+print(K * 3)
+print(2 + K * 2)
+set c = 5
+print(c + 2 * 3)
+print(2 * 3 + c)
