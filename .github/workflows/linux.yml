@@ -85,8 +85,8 @@ jobs:
       - name: Build portable (scalar kernels)
         run: make portable
 
-      - name: Unit tests (scalar paths)
-        run: python3 tests/run_tests.py
+      - name: Unit tests (scalar paths, verbose for crash diagnosis)
+        run: python3 tests/run_tests.py --verbose
 
       - name: Regression suite (scalar paths)
         run: python3 tests/run_regression.py
