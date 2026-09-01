@@ -102,32 +102,42 @@ def main():
     except (OSError, subprocess.TimeoutExpired) as e:
         errors += fail(f"omnicc version --machine failed to run: {e}")
 
-    # 4. Runtime-reported version (sys module) agrees
-    prog = (
-        "use sys\n"
-        "print(sys.omni_ver())\n"
-        "print(sys.version())\n"
-    )
-    fd, path = tempfile.mkstemp(suffix=".ok", prefix="omni_verchk_")
-    with os.fdopen(fd, "w") as f:
-        f.write(prog)
-    try:
-        p = subprocess.run([OMNICC, "run", "--quiet", path],
-                           capture_output=True, text=True, timeout=60)
-        lines = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
-        if p.returncode != 0 or len(lines) < 2:
-            errors += fail(f"version probe program failed (exit {p.returncode})")
-        else:
-            if lines[0] != ver:
-                errors += fail(f"sys.omni_ver() = {lines[0]!r}, expected {ver!r}")
+    # 4. Runtime-reported version (sys module) agrees — requires the
+    # codegen backend (JIT-executed probe program). On non-x86-64 hosts
+    # `omnicc run` refuses with OMNI-E0005 (docs/AARCH64.md), so the
+    # runtime probes SKIP there; all other gate checks still run.
+    import platform as _pl
+    _mach = (os.uname().machine.lower() if os.name != "nt"
+             else _pl.machine().lower())
+    if _mach not in ("x86_64", "amd64"):
+        print(f"   sys.omni_ver()/sys.version():             "
+              f"[SKIP] backend probes need x86-64 (host {_mach}; OMNI-E0005)")
+    else:
+        prog = (
+            "use sys\n"
+            "print(sys.omni_ver())\n"
+            "print(sys.version())\n"
+        )
+        fd, path = tempfile.mkstemp(suffix=".ok", prefix="omni_verchk_")
+        with os.fdopen(fd, "w") as f:
+            f.write(prog)
+        try:
+            p = subprocess.run([OMNICC, "run", "--quiet", path],
+                               capture_output=True, text=True, timeout=60)
+            lines = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+            if p.returncode != 0 or len(lines) < 2:
+                errors += fail(f"version probe program failed (exit {p.returncode})")
             else:
-                print("   sys.omni_ver():                           OK")
-            if ver not in lines[1]:
-                errors += fail(f"sys.version() = {lines[1]!r}, does not contain {ver!r}")
-            else:
-                print("   sys.version():                            OK")
-    finally:
-        os.unlink(path)
+                if lines[0] != ver:
+                    errors += fail(f"sys.omni_ver() = {lines[0]!r}, expected {ver!r}")
+                else:
+                    print("   sys.omni_ver():                           OK")
+                if ver not in lines[1]:
+                    errors += fail(f"sys.version() = {lines[1]!r}, does not contain {ver!r}")
+                else:
+                    print("   sys.version():                            OK")
+        finally:
+            os.unlink(path)
 
     print("-" * 62)
     if errors == 0:
