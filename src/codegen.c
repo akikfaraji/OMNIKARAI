@@ -3162,9 +3162,28 @@ static void cg_module_call(CodeGen*cg,AST_Expression_Call*call,const char*ns,con
             emit_load_arg0(&cg->code,s);
             cg_call_extern(cg,g_fn_list_push);
             if(call->arguments[0]&&call->arguments[0]->type==IDENTIFIER){
+                /* push may realloc-move the list; the (possibly new) pointer
+                   in RAX is the variable's canonical value — sync it to the
+                   PINNED REGISTER first (a stale register made every push
+                   after a move operate on the old allocation: SIGSEGV /
+                   'Fatal: OOM list_push'), then to the stack slot. */
                 const char*lst_var=((AST_Expression_Identifier*)call->arguments[0])->value;
                 Symbol*lst_sym=scope_get(cg->scope,lst_var);
-                if(lst_sym) emit_store_rax(&cg->code,lst_sym->stack_offset);
+                if(lst_sym){
+                    int _pr=-1;
+                    for(int _ri=0;_ri<cg->reg_var_depth&&_ri<7;_ri++)
+                        if(!strcmp(cg->reg_var_names[_ri],lst_var)){_pr=_ri;break;}
+                    if(_pr>=0){switch(_pr){
+                        case 0:emit_u8(&cg->code,0x49);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0xC6);break;
+                        case 1:emit_u8(&cg->code,0x49);emit_u8(&cg->code,0x89);emit_u8(&cg->code,0xC7);break;
+                        case 2:emit_mov_rbx_rax(&cg->code);break;
+                        case 3:emit_mov_r12_rax(&cg->code);break;
+                        case 4:emit_mov_r13_rax(&cg->code);break;
+                        case 5:emit_mov_rsi_rax(&cg->code);break;
+                        case 6:emit_mov_rdi_rax(&cg->code);break;}}
+                    emit_store_rax(&cg->code,lst_sym->stack_offset);
+                    eph_invalidate(cg);
+                }
             }
             emit_xor_rax_rax(&cg->code);
             cg->scope->next_offset-=8;return;}
