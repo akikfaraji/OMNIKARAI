@@ -145,5 +145,6 @@ typedef struct {
 
 void  lexer_init(Lexer* l, const char* source_code);
 Token get_next_token(Lexer* l);
+const char* omni_token_name(OmniTokenType t);  /* diagnostics: human-readable token name */
 
 #endif /* OMNIKARAI_LEXER_H */

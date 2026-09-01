@@ -72,6 +72,7 @@
 #include "abi.h"             // calling-convention abstraction
 
 #include "omni_version.h"    // single-sourced version (V01 convention)
+#include "omni_diag.h"       // structured diagnostics (V01.00)
 #include "codegen.h"
 #include "ast.h"
 #include "lexer.h"
@@ -116,7 +117,27 @@ void codegen_set_source(const char* filename, const char* source) {
     g_source_line_count = idx;
 }
 
+/* Map legacy error kinds to stable diagnostic codes (docs/DIAGNOSTICS.md). */
+static const char* omni_diag_code_for_kind(const char* kind) {
+    if (strcmp(kind, "NameError")  == 0) return "OMNI-E3001";
+    if (strcmp(kind, "TypeError")  == 0) return "OMNI-E3002";
+    if (strcmp(kind, "ValueError") == 0) return "OMNI-E3003";
+    return "OMNI-E3099";
+}
+
 static void omni_error(int line, int col, const char* kind, const char* fmt, ...) {
+    char msg[512];
+    va_list args; va_start(args, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+    const char* code = omni_diag_code_for_kind(kind);
+    /* JSON capture mode: record and exit — the CLI's atexit handler
+       flushes the JSON document. Exit code stays 1 (deterministic). */
+    if (omni_diag_capture_active()) {
+        omni_diag_add(omni_diag_capture_list(), OMNI_DIAG_ERROR, code,
+                      g_error_filename, line, col, 0, "%s", msg);
+        exit(1);
+    }
     fprintf(stderr, "\n  File \"%s\", line %d\n", g_error_filename, line);
     if (line >= 1 && line <= g_source_line_count) {
         fprintf(stderr, "    %s\n", g_source_lines[line-1]);
@@ -124,14 +145,22 @@ static void omni_error(int line, int col, const char* kind, const char* fmt, ...
         for (int i = 1; i < col; i++) fprintf(stderr, " ");
         fprintf(stderr, "^\n");
     }
-    va_list args; va_start(args, fmt);
-    fprintf(stderr, "%s: ", kind); vfprintf(stderr, fmt, args); va_end(args);
-    fprintf(stderr, "\n\n"); exit(1);
+    fprintf(stderr, "%s %s: %s\n\n", code, kind, msg);
+    exit(1);
 }
 static void omni_error_nopos(const char* kind, const char* fmt, ...) {
+    char msg[512];
     va_list args; va_start(args, fmt);
-    fprintf(stderr, "\n%s: ", kind); vfprintf(stderr, fmt, args); va_end(args);
-    fprintf(stderr, "\n\n"); exit(1);
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    va_end(args);
+    const char* code = omni_diag_code_for_kind(kind);
+    if (omni_diag_capture_active()) {
+        omni_diag_add(omni_diag_capture_list(), OMNI_DIAG_ERROR, code,
+                      g_error_filename, 0, 0, 0, "%s", msg);
+        exit(1);
+    }
+    fprintf(stderr, "\n%s %s: %s\n\n", code, kind, msg);
+    exit(1);
 }
 
 // ============================================================

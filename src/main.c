@@ -32,17 +32,86 @@
 #include "omni_platform.h"   // platform layer (Win32 native / POSIX shims)
 
 #include "omni_version.h"    // single-sourced version (V01 convention)
+#include "omni_diag.h"       // structured diagnostics (V01.00)
 #include "lexer.h"
 #include "parser.h"
 #include "ast.h"
 #include "codegen.h"
 
-// ── Global flags ─────────────────────────────────────────────
+// ── Global flags ─────────────────────────────────────────
 static int g_quiet = 0;
 static int g_ut    = 0;
 extern int g_beta;
 
+/* JSON diagnostics mode (`omnicc check --json`): stdout carries a
+   omnikarai.diag.v0 document; stderr stays silent; exit codes:
+   0 clean · 1 diagnostics reported · 2 usage/IO error.
+   See docs/DIAGNOSTICS.md for the schema contract. */
+static int           g_json_mode    = 0;
+static int           g_json_printed = 0;
+static OmniDiagList  g_json_diags;
+
 #define OMNI_LOG(...) do { if (!g_quiet && !g_ut) fprintf(stderr, __VA_ARGS__); } while(0)
+
+/* atexit flush: codegen errors terminate via exit(1) inside
+   codegen.c; in JSON mode the capture list is flushed here so the
+   document is printed exactly once, on every termination path. */
+static void omni_json_atexit_flush(void) {
+    if (!g_json_mode || g_json_printed) return;
+    g_json_printed = 1;
+    omni_diag_print_json(omni_diag_capture_list(), 0, stdout);
+    omni_diag_capture_end();
+}
+
+static void emit_json(OmniDiagList* list, int ok) {
+    g_json_printed = 1;
+    omni_diag_print_json(list, ok, stdout);
+    if (list == &g_json_diags) omni_diag_init(&g_json_diags);
+}
+
+/* Split source into lines for caret rendering in text diagnostics. */
+static char** split_source_lines(const char* source, int* out_count) {
+    if (!source) { *out_count = 0; return NULL; }
+    int count = 1;
+    for (const char* p = source; *p; p++) if (*p == '\n') count++;
+    char** lines = (char**)calloc((size_t)count, sizeof(char*));
+    if (!lines) { *out_count = 0; return NULL; }
+    const char* start = source; int idx = 0;
+    for (const char* p = source; ; p++) {
+        if (*p == '\n' || *p == '\0') {
+            size_t len = (size_t)(p - start);
+            lines[idx] = (char*)malloc(len + 1);
+            if (lines[idx]) {
+                memcpy(lines[idx], start, len);
+                lines[idx][len] = '\0';
+            }
+            idx++;
+            if (*p == '\0') break;
+            start = p + 1;
+        }
+    }
+    *out_count = idx;
+    return lines;
+}
+
+static void free_source_lines(char** lines, int count) {
+    if (!lines) return;
+    for (int i = 0; i < count; i++) free(lines[i]);
+    free(lines);
+}
+
+/* Print parser diagnostics in text mode (with --beta internal detail). */
+static void print_text_diags(const OmniDiagList* diags, const char* source) {
+    int nlines = 0;
+    char** lines = split_source_lines(source, &nlines);
+    omni_diag_print_text(diags, lines, nlines, stderr);
+    free_source_lines(lines, nlines);
+    if (g_beta) {
+        for (const OmniDiag* d = diags->head; d; d = d->next)
+            if (d->detail[0])
+                fprintf(stderr, "[BETA-DIAG] %s %s\n", d->code, d->detail);
+    }
+}
 
 // ── Version banner ───────────────────────────────────────────
 static void print_version(void) {
@@ -81,20 +150,38 @@ static void print_version_machine(void) {
 }
 
 // ── Usage ────────────────────────────────────────────────────
-static void print_usage(void) {
-    print_version();
-    fprintf(stderr,
-        "\nUsage:\n"
-        "  omnicc run   [--quiet] [--beta] <file.ok>   compile and run (JIT)\n"
-        "  omnicc build [--quiet] [--beta] <file.ok>   compile to standalone executable\n"
-        "                                              (embeds runtime + source)\n"
-        "  omnicc dump  [--quiet] [--beta] <file.ok>   dump x86-64 machine code bytes\n"
-        "  omnicc check [--quiet] [--beta] <file.ok>   parse + check only (no run)\n"
-        "  omnicc version                               show version info\n"
-        "\nFlags:\n"
+/* Usage/help text. Goes to stdout for explicit --help (exit 0) and
+   to stderr for usage errors. */
+static void print_usage_to(FILE* out) {
+    fprintf(out,
+        "Omnikarai Compiler (omnicc) " OMNI_VERSION "\n"
+        "  x86-64 native code | No LLVM | No dependencies\n"
+        "\n"
+        "Usage:\n"
+        "  omnicc run     [--quiet] [--beta] <file.ok>   compile and run (JIT)\n"
+        "  omnicc build   [--quiet] [--beta] <file.ok>   compile to standalone executable\n"
+        "                                                 (embeds runtime + source)\n"
+        "  omnicc dump    [--quiet] [--beta] <file.ok>   dump x86-64 machine code bytes\n"
+        "  omnicc check   [--quiet] [--beta] [--json] <file.ok>\n"
+        "                                                parse + check only (no run)\n"
+        "  omnicc version [--machine]                     show version info\n"
+        "\n"
+        "Flags:\n"
         "  --quiet   suppress [omnicc] diagnostic output\n"
         "  --beta    enable verbose beta debug traces (codegen + runtime)\n"
+        "  --json    check only: emit omnikarai.diag.v0 JSON to stdout\n"
+        "\n"
+        "Exit codes:\n"
+        "  0  success (or the program's own exit code for run)\n"
+        "  1  diagnostics reported (parse/compile errors)\n"
+        "  2  usage or IO error (unknown command/flag, cannot open file)\n"
+        "\n"
+        "Docs: docs/DIAGNOSTICS.md (JSON schema), docs/LANGUAGE.md (language)\n"
     );
+}
+
+static void print_usage(void) {
+    print_usage_to(stderr);
 }
 
 // ── File reader ──────────────────────────────────────────────
@@ -117,20 +204,29 @@ static char* read_file(const char* path) {
 }
 
 // ── Compile pipeline: source → AST ──────────────────────────
-static AST_Program* compile_source(const char* source, const char* filename) {
+/* Parses `source`. On parse errors returns NULL; diagnostics are
+   moved into *out_diags when the caller wants them (JSON mode),
+   otherwise they are printed to stderr in text form. */
+static AST_Program* compile_source(const char* source, const char* filename,
+                                   OmniDiagList* out_diags) {
     Lexer l;
     lexer_init(&l, source);
     Parser* p = new_parser(&l);
+    p->diag_file = filename;
     AST_Program* program = parse_program(p);
     if (p->error_count > 0) {
-        fprintf(stderr, "\n  File \"%s\"\n", filename);
-        fprintf(stderr, "ParseError: %d error(s) found\n\n", p->error_count);
-        for (int i = 0; i < p->error_count; i++)
-            fprintf(stderr, "  [%d] %s\n", i + 1, p->errors[i]);
-        fprintf(stderr, "\n");
+        if (out_diags) {
+            *out_diags = p->diags;          /* move ownership */
+            omni_diag_init(&p->diags);
+        } else {
+            fprintf(stderr, "\n  %s: %d error(s) found\n", filename, p->error_count);
+            print_text_diags(&p->diags, source);
+            fprintf(stderr, "\n");
+        }
         free_parser(p);
         return NULL;
     }
+    omni_diag_free(&p->diags);
     OMNI_LOG("[omnicc] parsed %d statement(s) from '%s'\n",
              program->statement_count, filename);
     free_parser(p);
@@ -181,8 +277,8 @@ void omni_host_set_jit_region(void* mem, size_t sz) {
 
 static int cmd_run(const char* filepath) {
     char* source = read_file(filepath);
-    if (!source) return 1;
-    AST_Program* program = compile_source(source, filepath);
+    if (!source) return 2;
+    AST_Program* program = compile_source(source, filepath, NULL);
     if (!program) { free(source); return 1; }
     CodeGen cg;
     codegen_set_source(filepath, source);
@@ -218,8 +314,8 @@ static int cmd_run(const char* filepath) {
 // ── omnicc dump ──────────────────────────────────────────────
 static int cmd_dump(const char* filepath) {
     char* source = read_file(filepath);
-    if (!source) return 1;
-    AST_Program* program = compile_source(source, filepath);
+    if (!source) return 2;
+    AST_Program* program = compile_source(source, filepath, NULL);
     if (!program) { free(source); return 1; }
     CodeGen cg;
     codegen_set_source(filepath, source);
@@ -236,10 +332,49 @@ static int cmd_dump(const char* filepath) {
 }
 
 // ── omnicc check ─────────────────────────────────────────────
-static int cmd_check(const char* filepath) {
+/* Parse + full compile validation without executing.
+   Text mode: human-readable diagnostics on stderr.
+   JSON mode (--json): omnikarai.diag.v0 document on stdout —
+   stable enough for editors, CI and AI coding agents
+   (schema: docs/DIAGNOSTICS.md). */
+static int cmd_check(const char* filepath, int json) {
     char* source = read_file(filepath);
-    if (!source) return 1;
-    AST_Program* program = compile_source(source, filepath);
+    if (!source) {
+        if (json) {
+            OmniDiagList list;
+            omni_diag_init(&list);
+            omni_diag_add(&list, OMNI_DIAG_ERROR, "OMNI-E0004",
+                          filepath, 0, 0, 0, "cannot open source file");
+            emit_json(&list, 0);
+        }
+        return 2;
+    }
+    if (json) {
+        AST_Program* program = compile_source(source, filepath, &g_json_diags);
+        if (!program) {
+            emit_json(&g_json_diags, 0);
+            free(source);
+            return 1;
+        }
+        /* parse OK → codegen; a codegen error exits(1) inside codegen.c
+           and the atexit handler flushes the JSON document. */
+        CodeGen cg;
+        codegen_set_source(filepath, source);
+        free(source);
+        codegen_init(&cg);
+        int ok = codegen_compile(&cg, program);
+        if (ok) {
+            emit_json(&g_json_diags, 1);
+            codegen_free(&cg);
+            return 0;
+        }
+        /* non-exit failure path (should not normally happen) */
+        if (!g_json_printed)
+            emit_json(&g_json_diags, 0);
+        codegen_free(&cg);
+        return 1;
+    }
+    AST_Program* program = compile_source(source, filepath, NULL);
     if (!program) { free(source); return 1; }
     CodeGen cg;
     codegen_set_source(filepath, source);
@@ -247,7 +382,7 @@ static int cmd_check(const char* filepath) {
     codegen_init(&cg);
     int ok = codegen_compile(&cg, program);
     if (ok)
-        fprintf(stderr, "[omnicc] check OK — %zu bytes generated, no errors\n", cg.code.size);
+        OMNI_LOG("[omnicc] check OK — %zu bytes generated, no errors\n", cg.code.size);
     else
         fprintf(stderr, "[omnicc] check FAILED\n");
     codegen_free(&cg);
@@ -326,7 +461,7 @@ static char* omni_read_own_payload(uint64_t* out_len) {
 /* Compile + run an in-memory source (shared by cmd_run and the embedded
    payload path). Takes ownership of nothing; mirrors cmd_run's body. */
 static int omni_run_source(const char* path, char* source) {
-    AST_Program* program = compile_source(source, path);
+    AST_Program* program = compile_source(source, path, NULL);
     if (!program) { free(source); return 1; }
     CodeGen cg;
     codegen_set_source(path, source);
@@ -369,8 +504,8 @@ static int cmd_build(const char* filepath) {
 
     // ── Read + validate the source BEFORE copying (fail early) ──
     char* source = read_file(filepath);
-    if (!source) return 1;
-    AST_Program* program = compile_source(source, filepath);
+    if (!source) return 2;
+    AST_Program* program = compile_source(source, filepath, NULL);
     if (!program) { free(source); return 1; }
     free(source);   /* validated; the payload appends the original file bytes */
     /* NOTE: compile_source parsed successfully — the program is valid.
@@ -442,8 +577,14 @@ int main(int argc, char** argv) {
         if (rc >= 0) return rc;
     }
 
-    if (argc < 2) { print_usage(); return 1; }
+    if (argc < 2) { print_usage(); return 2; }
     const char* cmd = argv[1];
+
+    /* Explicit help: stdout, exit 0 (docs/DIAGNOSTICS.md exit-code table) */
+    if (strcmp(cmd, "--help") == 0 || strcmp(cmd, "-h") == 0 || strcmp(cmd, "help") == 0) {
+        print_usage_to(stdout);
+        return 0;
+    }
 
     if (strcmp(cmd, "version") == 0 || strcmp(cmd, "--version") == 0) {
         for (int i = 2; i < argc; i++) {
@@ -453,26 +594,40 @@ int main(int argc, char** argv) {
     }
 
     const char* filepath = NULL;
+    int check_json = 0;
     for (int i = 2; i < argc; i++) {
         if      (strcmp(argv[i], "--quiet") == 0) { g_quiet = 1; }
         else if (strcmp(argv[i], "--beta")  == 0) { g_beta  = 1; fprintf(stderr,"[omnicc] --beta mode enabled\n"); }
         else if (strcmp(argv[i], "--ut")    == 0) { g_ut    = 1; g_quiet = 1; }
+        else if (strcmp(argv[i], "--json")  == 0) { check_json = 1; }
+        else if (argv[i][0] == '-' && argv[i][1] == '-') {
+            fprintf(stderr, "Error: unknown flag '%s' (see omnicc --help)\n", argv[i]);
+            return 2;
+        }
         else { filepath = argv[i]; }
     }
 
     if (!filepath &&
         (strcmp(cmd,"run")==0||strcmp(cmd,"dump")==0||
          strcmp(cmd,"check")==0||strcmp(cmd,"build")==0)) {
-        fprintf(stderr, "Error: no source file specified\n");
-        print_usage(); return 1;
+        fprintf(stderr, "Error: no source file specified (see omnicc --help)\n");
+        return 2;
     }
 
     if (strcmp(cmd, "run")   == 0) return cmd_run(filepath);
     if (strcmp(cmd, "dump")  == 0) return cmd_dump(filepath);
-    if (strcmp(cmd, "check") == 0) return cmd_check(filepath);
+    if (strcmp(cmd, "check") == 0) {
+        if (check_json) {
+            g_json_mode = 1;
+            g_quiet = 1;   /* stdout JSON must not mix with [omnicc] logs */
+            atexit(omni_json_atexit_flush);
+            omni_diag_capture_begin(filepath);
+            omni_diag_init(&g_json_diags);
+        }
+        return cmd_check(filepath, check_json);
+    }
     if (strcmp(cmd, "build") == 0) return cmd_build(filepath);
 
-    fprintf(stderr, "Unknown command '%s'\n\n", cmd);
-    print_usage();
-    return 1;
+    fprintf(stderr, "Error: unknown command '%s' (see omnicc --help)\n", cmd);
+    return 2;
 }

@@ -59,6 +59,103 @@ static Token new_token(OmniTokenType type, const char* literal) {
     return tok;
 }
 
+/* Human-readable token names for diagnostics (docs/DIAGNOSTICS.md).
+   Punctuation returns its glyph so messages read naturally:
+   "expected ':' but found identifier 'x'". Used by parser + CLI. */
+const char* omni_token_name(OmniTokenType t) {
+    switch (t) {
+        case TOKEN_ILLEGAL:   return "illegal character";
+        case TOKEN_EOF:       return "end of file";
+        case TOKEN_INDENT:    return "indent";
+        case TOKEN_DEDENT:    return "dedent";
+        case TOKEN_NL:        return "end of line";
+        case TOKEN_IDENT:     return "identifier";
+        case TOKEN_INT:       return "integer";
+        case TOKEN_FLOAT:     return "float";
+        case TOKEN_STRING:    return "string";
+        case TOKEN_FSTRING:   return "f-string";
+        case TOKEN_ASSIGN:    return "'='";
+        case TOKEN_PLUS:      return "'+'";
+        case TOKEN_MINUS:     return "'-'";
+        case TOKEN_STAR:      return "'*'";
+        case TOKEN_SLASH:     return "'/'";
+        case TOKEN_PERCENT:   return "'%'";
+        case TOKEN_POWER:     return "'**'";
+        case TOKEN_EQ:        return "'=='";
+        case TOKEN_NOT_EQ:    return "'!='";
+        case TOKEN_LT:        return "'<'";
+        case TOKEN_GT:        return "'>'";
+        case TOKEN_LTE:       return "'<='";
+        case TOKEN_GTE:       return "'>='";
+        case TOKEN_PLUS_ASSIGN:    return "'+='";
+        case TOKEN_MINUS_ASSIGN:   return "'-='";
+        case TOKEN_STAR_ASSIGN:    return "'*='";
+        case TOKEN_SLASH_ASSIGN:   return "'/='";
+        case TOKEN_PERCENT_ASSIGN: return "'%='";
+        case TOKEN_POWER_ASSIGN:   return "'**='";
+        case TOKEN_AMP_ASSIGN:     return "'&='";
+        case TOKEN_PIPE_ASSIGN:    return "'|='";
+        case TOKEN_CARET_ASSIGN:   return "'^='";
+        case TOKEN_AMP:      return "'&'";
+        case TOKEN_PIPE:     return "'|'";
+        case TOKEN_CARET:    return "'^'";
+        case TOKEN_TILDE:    return "'~'";
+        case TOKEN_LSHIFT:   return "'<<'";
+        case TOKEN_RSHIFT:   return "'>>'";
+        case TOKEN_ARROW:    return "'->'";
+        case TOKEN_AT:       return "'@'";
+        case TOKEN_COMMA:     return "','";
+        case TOKEN_COLON:     return "':'";
+        case TOKEN_DCOLON:    return "'::'";
+        case TOKEN_LPAREN:    return "'('";
+        case TOKEN_RPAREN:    return "')'";
+        case TOKEN_LBRACKET:  return "'['";
+        case TOKEN_RBRACKET:  return "']'";
+        case TOKEN_LBRACE:    return "'{'";
+        case TOKEN_RBRACE:    return "'}'";
+        case TOKEN_SEMICOLON: return "';'";
+        case TOKEN_DOT:       return "'.'";
+        case TOKEN_ELLIPSIS:  return "'...'";
+        case TOKEN_IF:      return "'if'";
+        case TOKEN_ELIF:    return "'elif'";
+        case TOKEN_ELSE:    return "'else'";
+        case TOKEN_WHILE:   return "'while'";
+        case TOKEN_FOR:     return "'for'";
+        case TOKEN_IN:      return "'in'";
+        case TOKEN_BREAK:   return "'break'";
+        case TOKEN_CONTINUE:return "'continue'";
+        case TOKEN_PASS:    return "'pass'";
+        case TOKEN_RETURN:  return "'return'";
+        case TOKEN_YIELD:   return "'yield'";
+        case TOKEN_MATCH:   return "'match'";
+        case TOKEN_CASE:    return "'case'";
+        case TOKEN_WITH:    return "'with'";
+        case TOKEN_FN:      return "'fn'";
+        case TOKEN_CLASS:   return "'class'";
+        case TOKEN_EXTENDS: return "'extends'";
+        case TOKEN_SELF:    return "'self'";
+        case TOKEN_SET:     return "'set'";
+        case TOKEN_LET:     return "'let'";
+        case TOKEN_CONST:   return "'const'";
+        case TOKEN_USE:     return "'use'";
+        case TOKEN_IMPORT:  return "'import'";
+        case TOKEN_FROM:    return "'from'";
+        case TOKEN_AS:      return "'as'";
+        case TOKEN_TRY:     return "'try'";
+        case TOKEN_EXCEPT:  return "'except'";
+        case TOKEN_RAISE:   return "'raise'";
+        case TOKEN_DEL:     return "'del'";
+        case TOKEN_AND:     return "'and'";
+        case TOKEN_OR:      return "'or'";
+        case TOKEN_NOT:     return "'not'";
+        case TOKEN_TRUE:    return "'true'";
+        case TOKEN_FALSE:   return "'false'";
+        case TOKEN_NIL:     return "'nil'";
+        default:            return "token";
+    }
+}
+
+
 static int is_letter(char ch) { return isalpha((unsigned char)ch) || ch == '_'; }
 
 static void skip_inline_whitespace(Lexer* l) {
@@ -351,7 +448,9 @@ Token get_next_token(Lexer* l) {
            l->ch == '\n' || l->ch == '#') {
         if (l->pending_count > 0) {
             l->pending_count--;
-            return l->pending_tokens[l->pending_count];
+            Token t = l->pending_tokens[l->pending_count];
+            if (t.line == 0) { t.line = l->line_num; t.col = l->col_num; }
+            return t;
         }
         if (l->at_bol) {
             handle_leading_whitespace_and_comments(l);
@@ -383,7 +482,9 @@ Token get_next_token(Lexer* l) {
 
     if (l->pending_count > 0) {
         l->pending_count--;
-        return l->pending_tokens[l->pending_count];
+        Token t = l->pending_tokens[l->pending_count];
+        if (t.line == 0) { t.line = l->line_num; t.col = l->col_num; }
+        return t;
     }
     while (l->ch == '\r') read_char(l);
 

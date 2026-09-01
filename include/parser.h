@@ -3,6 +3,7 @@
 
 #include "lexer.h"
 #include "ast.h"
+#include "omni_diag.h"
 
 // Forward declare Parser for use in function pointer types
 typedef struct Parser Parser;
@@ -20,6 +21,10 @@ struct Parser {
     // For error handling
     char** errors;
     int error_count;
+
+    // Structured diagnostics (V01.00 — docs/DIAGNOSTICS.md)
+    OmniDiagList diags;
+    const char*  diag_file;   // file shown in diagnostics (set by CLI)
 
     // Indent depth tracker: incremented on TOKEN_INDENT, decremented on TOKEN_DEDENT.
     // parse_block_statement uses this to know when its own DEDENT was consumed.

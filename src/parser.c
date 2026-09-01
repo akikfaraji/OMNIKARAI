@@ -6,6 +6,7 @@
 #include "parser.h"
 #include "ast.h"
 #include "lexer.h"
+#include "omni_diag.h"
 
 // --- Precedence Enum for Pratt Parser ---
 typedef enum {
@@ -68,23 +69,46 @@ static int expect_peek(Parser* p, OmniTokenType t);
 
 
 // --- Error Handling ---
-static void parser_add_error(Parser* p, const char* msg) {
+/* Structured diagnostics (V01.00): every parse error records a
+   OmniDiag with file/line/column from the current token, a stable
+   code and a clean human-readable message. The legacy plain-string
+   errors array is kept in sync for compatibility. Internal token
+   debug detail is stored on the diagnostic but shown only with
+   --beta — never in tooling-facing output. */
+static void parser_add_error_code(Parser* p, const char* code, const char* msg) {
+    int line = p->currentToken.line;
+    int col  = p->currentToken.col;
+    int span = (p->currentToken.literal && p->currentToken.literal[0])
+               ? (int)strlen(p->currentToken.literal) : 1;
+    OmniDiag* d = omni_diag_add(&p->diags, OMNI_DIAG_ERROR, code,
+                                p->diag_file ? p->diag_file : "<input>",
+                                line, col, span, "%s", msg);
+    if (d) {
+        snprintf(d->detail, sizeof(d->detail),
+                 "cur_tok=%d '%s' peek=%d '%s'",
+                 p->currentToken.type,
+                 p->currentToken.literal ? p->currentToken.literal : "(null)",
+                 p->peekToken.type,
+                 p->peekToken.literal ? p->peekToken.literal : "(null)");
+    }
+    /* legacy string errors array — now carries the clean message */
     p->error_count++;
     p->errors = realloc(p->errors, p->error_count * sizeof(char*));
-    // Include current token type number and literal in error for debugging
-    char full_msg[512];
-    snprintf(full_msg, sizeof(full_msg), "%s  [cur_tok=%d '%s' peek=%d '%s']",
-             msg,
-             p->currentToken.type,
-             p->currentToken.literal ? p->currentToken.literal : "(null)",
-             p->peekToken.type,
-             p->peekToken.literal ? p->peekToken.literal : "(null)");
-    char* error_msg = malloc(strlen(full_msg) + 1);
-    if (strcpy_s(error_msg, strlen(full_msg) + 1, full_msg) != 0) {
-        fprintf(stderr, "Fatal: strcpy_s failed in parser_add_error\n");
+    if (!p->errors) {
+        fprintf(stderr, "Fatal: OOM parser error list\n");
         exit(1);
     }
+    char* error_msg = malloc(strlen(msg) + 1);
+    if (!error_msg) {
+        fprintf(stderr, "Fatal: OOM parser error message\n");
+        exit(1);
+    }
+    memcpy(error_msg, msg, strlen(msg) + 1);
     p->errors[p->error_count - 1] = error_msg;
+}
+
+static void parser_add_error(Parser* p, const char* msg) {
+    parser_add_error_code(p, "OMNI-E2099", msg);
 }
 
 // --- Token Management Implementations ---
@@ -106,9 +130,20 @@ static int expect_peek(Parser* p, OmniTokenType t) {
         parser_next_token(p);
         return 1;
     } else {
-        char err[100];
-        sprintf(err, "Expected next token to be %d, got %d instead", t, p->peekToken.type);
-        parser_add_error(p, err);
+        char err[200];
+        if (p->peekToken.type == TOKEN_EOF) {
+            snprintf(err, sizeof(err), "unexpected end of file — expected %s",
+                     omni_token_name(t));
+        } else if (p->peekToken.literal && p->peekToken.literal[0] &&
+                   p->peekToken.type != TOKEN_ILLEGAL) {
+            snprintf(err, sizeof(err), "expected %s but found %s '%s'",
+                     omni_token_name(t), omni_token_name(p->peekToken.type),
+                     p->peekToken.literal);
+        } else {
+            snprintf(err, sizeof(err), "expected %s but found %s",
+                     omni_token_name(t), omni_token_name(p->peekToken.type));
+        }
+        parser_add_error_code(p, "OMNI-E2001", err);
         return 0;
     }
 }
@@ -247,7 +282,7 @@ static AST_Expression_Identifier** parse_function_parameters(Parser* p) {
     parser_next_token(p); // consume '(' or ','
 
     if (!current_token_is(p, TOKEN_IDENT) && !current_token_is(p, TOKEN_SELF)) {
-        parser_add_error(p, "Expected identifier in parameter list");
+        parser_add_error_code(p, "OMNI-E2002", "expected parameter name");
         return NULL;
     } // FIX: accept TOKEN_SELF as a valid parameter name (e.g. fn init(self, ...))
     
@@ -290,7 +325,7 @@ static AST_Statement* parse_fn_definition(Parser* p) {
     int count = 0;
     if (stmt->parameters != NULL) { while(stmt->parameters[count] != NULL) count++; }
     stmt->parameter_count = count;
-    if (!expect_peek(p, TOKEN_COLON)) { parser_add_error(p, "Expected ':' after function signature"); return NULL; }
+    if (!expect_peek(p, TOKEN_COLON)) { parser_add_error_code(p, "OMNI-E2003", "expected ':' after function signature"); return NULL; }
     stmt->body = parse_block_statement(p);
     if (current_token_is(p, TOKEN_DEDENT)) parser_next_token(p);
     return (AST_Statement*)stmt;
@@ -313,7 +348,7 @@ static AST_Expression* parse_fn_expression(Parser* p) {
     expr->parameter_count = count;
 
     if (!expect_peek(p, TOKEN_COLON)) {
-        parser_add_error(p, "Expected ':' after function signature");
+        parser_add_error_code(p, "OMNI-E2003", "expected ':' after function signature");
         return NULL;
     }
 
@@ -329,7 +364,7 @@ static AST_Statement* parse_while_statement(Parser* p) {
     stmt->base.token = p->currentToken;
     parser_next_token(p); // consume 'while'
     stmt->condition = parse_expression(p, PREC_LOWEST);
-    if (!expect_peek(p, TOKEN_COLON)) { parser_add_error(p, "Expected ':' after while condition"); return NULL; }
+    if (!expect_peek(p, TOKEN_COLON)) { parser_add_error_code(p, "OMNI-E2003", "expected ':' after while condition"); return NULL; }
     stmt->body = parse_block_statement(p);
     if (current_token_is(p, TOKEN_DEDENT)) parser_next_token(p);
     return (AST_Statement*)stmt;
@@ -345,7 +380,7 @@ static AST_Statement* parse_for_statement(Parser* p) {
     if (!expect_peek(p, TOKEN_IN)) { return NULL; }
     parser_next_token(p); // consume 'in'
     stmt->iterable = parse_expression(p, PREC_LOWEST);
-    if (!expect_peek(p, TOKEN_COLON)) { parser_add_error(p, "Expected ':' after for statement"); return NULL; }
+    if (!expect_peek(p, TOKEN_COLON)) { parser_add_error_code(p, "OMNI-E2003", "expected ':' after for statement"); return NULL; }
     stmt->body = parse_block_statement(p);
     if (current_token_is(p, TOKEN_DEDENT)) parser_next_token(p);
     return (AST_Statement*)stmt;
@@ -375,7 +410,7 @@ static AST_Statement_MatchCase* parse_match_case(Parser* p) {
 
     // Now expect ':'
     if (!expect_peek(p, TOKEN_COLON)) {
-        parser_add_error(p, "Expected ':' after case pattern");
+        parser_add_error_code(p, "OMNI-E2003", "expected ':' after case pattern");
         return NULL;
     }
     // Now parse the body block
@@ -398,7 +433,7 @@ static AST_Statement* parse_match_statement(Parser* p) {
 
     while (peek_token_is(p, TOKEN_NL)) parser_next_token(p);
     if (!expect_peek(p, TOKEN_INDENT)) {
-        parser_add_error(p, "Expected indented block after 'match:'");
+        parser_add_error_code(p, "OMNI-E2004", "expected indented block after 'match:'");
         return NULL;
     }
     parser_next_token(p); // advance past INDENT
@@ -501,7 +536,7 @@ static AST_Statement_Block* parse_block_statement(Parser* p) {
     while (peek_token_is(p, TOKEN_NL)) parser_next_token(p);
 
     if (!expect_peek(p, TOKEN_INDENT)) {
-        parser_add_error(p, "Expected indented block after ':'");
+        parser_add_error_code(p, "OMNI-E2004", "expected indented block after ':'");
         free(block);
         return NULL;
     }
@@ -1027,7 +1062,7 @@ static AST_Expression* parse_infix_expression(Parser* p, AST_Expression* left) {
 static AST_Expression* parse_expression(Parser* p, Precedence precedence) {
     prefix_parse_fn prefix = p->prefix_parse_fns[p->currentToken.type];
     if (prefix == NULL) {
-        parser_add_error(p, "No prefix parsing function found for current token");
+        parser_add_error_code(p, "OMNI-E2005", "unexpected token — no parsing rule for it here");
         return NULL;
     }
     AST_Expression* left_expr = prefix(p);
@@ -1153,6 +1188,8 @@ Parser* new_parser(Lexer* l) {
     p->errors = NULL;
     p->error_count = 0;
     p->indent_depth = 0;
+    omni_diag_init(&p->diags);
+    p->diag_file = "<input>";
 
     // Initialize parsing function tables
     for (int i = 0; i < 256; i++) { // Assuming max 256 token types
@@ -1229,6 +1266,7 @@ void free_parser(Parser* p) {
         free(p->errors[i]);
     }
     free(p->errors);
+    omni_diag_free(&p->diags);
     free(p);
 }
 
