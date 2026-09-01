@@ -40,6 +40,23 @@ _cand_exe = os.path.join(ROOT, "bin", "omnicc.exe")
 _cand_bin = os.path.join(ROOT, "bin", "omnicc")
 OMNICC    = _cand_exe if os.path.exists(_cand_exe) else _cand_bin
 
+# ── Architecture tier (docs/AARCH64.md, docs/PLATFORM_SUPPORT.md) ─────
+# omnicc's backend emits native x86-64 machine code, so any test that
+# EXECUTES a compiled program can only run on x86-64 hosts. On other
+# hosts (AArch64 Linux / Termux, Apple Silicon, ...) those tests are
+# SKIPPED with an explicit reason — never counted as passes, never
+# silently failed. The diagnostics tier (check --json, version gate)
+# is architecture-independent and runs everywhere.
+def _host_machine():
+    if IS_WIN:
+        return pyplatform.machine().lower()
+    return os.uname().machine.lower()
+
+HOST_MACHINE    = _host_machine()
+CODEGEN_ON_HOST = HOST_MACHINE in ("x86_64", "amd64")
+_SKIP_REASON = ("SKIP x86-64 backend only "
+                f"(host {HOST_MACHINE}; native AArch64 = V01.06, docs/AARCH64.md)")
+
 # Platform-adjusted expectations (honest per-host values, no weakening:
 # the same assertions hold, only the platform strings differ per host).
 # They follow the BINARY that was found, not the Python interpreter — an
@@ -121,17 +138,22 @@ def main():
     print("=" * 62)
     print(f"   Compiler: {OMNICC}")
     print(f"   Host:     {pyplatform.system()} {pyplatform.machine()}")
+    if not CODEGEN_ON_HOST:
+        print(f"   Tier:     diagnostics only — codegen tests skip on '{HOST_MACHINE}'")
     print()
 
     cases = list(TESTS)
     if args.stress:
         cases += [(f, name, "*") for f, name in STRESS]
 
-    passed, failed = [], []
+    passed, failed, skipped = [], [], []
     for fname, name, expect in cases:
         fpath = os.path.join(HERE, fname)
         if not os.path.exists(fpath):
             failed.append((name, "SKIP", "file not found", ""))
+            continue
+        if not CODEGEN_ON_HOST:
+            skipped.append(name)
             continue
         code, out = run_one(fpath)
         if code != 0:
@@ -166,12 +188,19 @@ def main():
         if args.verbose:
             for ln in output_lines(out):
                 print(f"      >> {ln}")
+    for name in skipped:
+        print(f"  {name:.<40} [SKIP] {_SKIP_REASON}")
     print("-" * 62)
     n_fail = len(failed)
-    print(f"   Results: {len(passed)}/{len(cases)} passed | {n_fail} failed/crashed")
+    print(f"   Results: {len(passed)}/{len(cases)} passed | "
+          f"{len(skipped)} skipped | {n_fail} failed/crashed")
     print()
     if n_fail == 0:
-        print("   ALL TESTS PASSED")
+        if skipped:
+            print(f"   ALL RAN TESTS PASSED ({len(skipped)} skipped: x86-64 "
+                  "codegen tier not available on this host)")
+        else:
+            print("   ALL TESTS PASSED")
     else:
         print("   SOME TESTS FAILED — debug with:  bin/omnicc run --beta tests/<file>.ok")
     print()

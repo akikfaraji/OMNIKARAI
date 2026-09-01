@@ -29,6 +29,23 @@ _cand_exe = os.path.join(ROOT, "bin", "omnicc.exe")
 _cand_bin = os.path.join(ROOT, "bin", "omnicc")
 OMNICC = _cand_exe if os.path.exists(_cand_exe) else _cand_bin
 
+# ── Architecture tier (docs/AARCH64.md) ──────────────────────────────
+# The r01–r13 programs assert the OUTPUT of compiled x86-64 machine code;
+# the JSON goldens assert parser/semantic diagnostics and are
+# architecture-independent. On a non-x86-64 host the program checks are
+# SKIPPED with an explicit reason; the JSON goldens still run.
+import platform as _pl
+
+def _host_machine():
+    if os.name == "nt":
+        return _pl.machine().lower()
+    return os.uname().machine.lower()
+
+HOST_MACHINE    = _host_machine()
+CODEGEN_ON_HOST = HOST_MACHINE in ("x86_64", "amd64")
+_SKIP_NOTE = (f"[SKIP] x86-64 backend only (host {HOST_MACHINE}; "
+              "native AArch64 = V01.06, docs/AARCH64.md)")
+
 # (file, [expected stdout lines]) — each case also asserts exit 0
 PROGRAMS = [
     ("r01_inline_return.ok",   ["1", "2", "10", "20", "1", "0"]),
@@ -101,12 +118,17 @@ def main():
     print("   OMNIKARAI -- REGRESSION SUITE (historical bug classes)")
     print("=" * 62)
     failures = 0
+    skipped = 0
 
     for fname, expected in PROGRAMS:
         path = os.path.join(REG, fname)
         if not os.path.exists(path):
             print(f"  {fname:.<44} [MISSING]")
             failures += 1
+            continue
+        if not CODEGEN_ON_HOST:
+            print(f"  {fname:.<44} {_SKIP_NOTE}")
+            skipped += 1
             continue
         code, out = run_prog(path)
         lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
@@ -130,34 +152,42 @@ def main():
             print(f"  {fname:.<44} [PASS]")
 
     # exit-code propagation (r11): stdout pinned + process exit code 7
-    path = os.path.join(REG, "r11_exit_code7.ok")
-    code, out = run_prog(path)
-    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-    if code == 7 and lines == ["quitting"]:
-        print(f"  {'r11_exit_code7.ok (exit 7)':.<44} [PASS]")
+    if CODEGEN_ON_HOST:
+        path = os.path.join(REG, "r11_exit_code7.ok")
+        code, out = run_prog(path)
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        if code == 7 and lines == ["quitting"]:
+            print(f"  {'r11_exit_code7.ok (exit 7)':.<44} [PASS]")
+        else:
+            print(f"  {'r11_exit_code7.ok (exit 7)':.<44} [FAIL] exit={code} out={lines}")
+            failures += 1
     else:
-        print(f"  {'r11_exit_code7.ok (exit 7)':.<44} [FAIL] exit={code} out={lines}")
-        failures += 1
+        print(f"  {'r11_exit_code7.ok (exit 7)':.<44} {_SKIP_NOTE}")
+        skipped += 1
 
     # standalone build (r12): the artifact must run and print correctly.
     # `omnicc build` swaps the .ok extension for .exe on every platform.
-    fd, src = tempfile.mkstemp(suffix=".ok", prefix="omni_r12_")
-    with os.fdopen(fd, "w") as f:
-        f.write('print("standalone")\nprint(6 * 7)\n')
-    exe = src[:-3] + ".exe"
-    try:
-        b = subprocess.run([OMNICC, "build", src], capture_output=True, text=True, timeout=60)
-        r = subprocess.run([exe], capture_output=True, text=True, timeout=60)
-        got = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
-        if b.returncode == 0 and r.returncode == 0 and got == ["standalone", "42"]:
-            print(f"  {'r12_standalone_build':.<44} [PASS]")
-        else:
-            print(f"  {'r12_standalone_build':.<44} [FAIL] build={b.returncode} run={r.returncode} out={got}")
-            failures += 1
-    finally:
-        for pth in (src, exe):
-            if os.path.exists(pth):
-                os.unlink(pth)
+    if CODEGEN_ON_HOST:
+        fd, src = tempfile.mkstemp(suffix=".ok", prefix="omni_r12_")
+        with os.fdopen(fd, "w") as f:
+            f.write('print("standalone")\nprint(6 * 7)\n')
+        exe = src[:-3] + ".exe"
+        try:
+            b = subprocess.run([OMNICC, "build", src], capture_output=True, text=True, timeout=60)
+            r = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+            got = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+            if b.returncode == 0 and r.returncode == 0 and got == ["standalone", "42"]:
+                print(f"  {'r12_standalone_build':.<44} [PASS]")
+            else:
+                print(f"  {'r12_standalone_build':.<44} [FAIL] build={b.returncode} run={r.returncode} out={got}")
+                failures += 1
+        finally:
+            for pth in (src, exe):
+                if os.path.exists(pth):
+                    os.unlink(pth)
+    else:
+        print(f"  {'r12_standalone_build':.<44} {_SKIP_NOTE}")
+        skipped += 1
 
     # ── JSON diagnostics golden checks (omnikarai.diag.v0) ──────────
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -206,7 +236,11 @@ def main():
 
     print("-" * 62)
     if failures == 0:
-        print("   ALL REGRESSION CHECKS PASSED")
+        if skipped:
+            print(f"   ALL RAN REGRESSION CHECKS PASSED "
+                  f"({skipped} skipped: x86-64 codegen tier not on this host)")
+        else:
+            print("   ALL REGRESSION CHECKS PASSED")
     else:
         print(f"   {failures} REGRESSION CHECK(S) FAILED")
     print()
