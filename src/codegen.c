@@ -1868,6 +1868,10 @@ static void emit_mov_rax_rsi(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x8B);emit_u8
 static void emit_mov_rax_rdi(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x8B);emit_u8(b,0xC7);} /* MOV RAX,RDI: 48 8B C7 */
 static void emit_mov_rdi_imm64(CodeBuf*b,int64_t v){emit_u8(b,REX_W);emit_u8(b,0xBF);emit_u64(b,(uint64_t)v);}
 static void emit_mov_rsi_imm64(CodeBuf*b,int64_t v){emit_u8(b,REX_W);emit_u8(b,0xBE);emit_u64(b,(uint64_t)v);}
+static void emit_mov_rcx_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC1);}
+static void emit_mov_rdx_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC2);}
+static void emit_mov_rdx_rcx(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xCA);}  /* MOV RDX,RCX */
+
 #if defined(OMNI_ABI_WIN64)
 static void emit_load_arg0(CodeBuf*b,int off){emit_load_rcx(b,off);}
 static void emit_load_arg1(CodeBuf*b,int off){emit_load_rdx(b,off);}
@@ -1902,9 +1906,6 @@ static void emit_stack_arg_sysv(CodeBuf*b,int stk_index){
     emit_u8(b,(uint8_t)(stk_index*8)); }                          /* mov [rsp+i*8],rax */
 #endif
 
-static void emit_mov_rcx_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC1);}
-static void emit_mov_rdx_rax(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xC2);}
-static void emit_mov_rdx_rcx(CodeBuf*b){emit_u8(b,REX_W);emit_u8(b,0x89);emit_u8(b,0xCA);}  /* MOV RDX,RCX */
 static void emit_mov_r11_rax(CodeBuf*b){emit_u8(b,0x49);emit_u8(b,0x89);emit_u8(b,0xC3);}
 static void emit_mov_rax_r11(CodeBuf*b){emit_u8(b,0x49);emit_u8(b,0x8B);emit_u8(b,0xC3);}  /* MOV RAX,R11: REX.WB 8B /r mod=11 reg=0(RAX) r/m=3+B=R11 */
 static void emit_mov_rax_r14(CodeBuf*b){emit_u8(b,REX_WB);emit_u8(b,0x8B);emit_u8(b,0xC6);}
