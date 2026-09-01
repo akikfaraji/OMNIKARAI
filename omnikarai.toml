@@ -1,6 +1,6 @@
 [metadata]
 name        = "omnikarai"
-version     = "V01.00.000-beta-01"
+version     = "V01.00.000-beta-02"
 description = "Omnikarai — native x86-64 compiler, no dependencies (Linux + Windows)"
 author      = "Akik Fuad | Fraziym Tech & AI"
 license     = "MIT"

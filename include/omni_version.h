@@ -34,7 +34,7 @@
  *      vV01.00.000-beta-01   (docs/VERSIONING.md)
  * ============================================================ */
 
-#define OMNI_VERSION "V01.00.000-beta-01"
+#define OMNI_VERSION "V01.00.000-beta-02"
 
 /* Last legacy (pre-V01) release. History/reference only — never
    reported by tools as the current version. */
