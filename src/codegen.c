@@ -73,6 +73,7 @@
 
 #include "omni_version.h"    // single-sourced version (V01 convention)
 #include "omni_diag.h"       // structured diagnostics (V01.00)
+#include "omni_mem.h"        // runtime allocation funnel (V01.00)
 #include "codegen.h"
 #include "ast.h"
 #include "lexer.h"
@@ -840,7 +841,7 @@ __attribute__((noinline)) int64_t omni_list_copy(int64_t lst_ptr) {
     if(!lst_ptr) return 0;
     OmniList* src=(OmniList*)lst_ptr;
     size_t sz=sizeof(OmniList)+(size_t)(src->capacity-1)*sizeof(int64_t);
-    OmniList* dst=(OmniList*)malloc(sz);
+    OmniList* dst=(OmniList*)omni_mem_alloc(sz);
     memcpy(dst,src,sz);
     return (int64_t)dst;
 }
@@ -912,7 +913,7 @@ __attribute__((noinline)) int64_t omni_list_concat(int64_t a_ptr, int64_t b_ptr)
 // ============================================================
 __attribute__((noinline)) int64_t omni_list_new(void) {
     int64_t cap=8;
-    OmniList* lst=(OmniList*)malloc(sizeof(int64_t)*2 + sizeof(int64_t)*(size_t)cap);
+    OmniList* lst=(OmniList*)omni_mem_alloc(sizeof(int64_t)*2 + sizeof(int64_t)*(size_t)cap);
     if(!lst){fprintf(stderr,"Fatal: OOM list_new\n");exit(1);}
     lst->capacity=cap; lst->length=0;
     return (int64_t)(uintptr_t)lst;
@@ -922,7 +923,7 @@ __attribute__((noinline)) int64_t omni_list_push(int64_t lst_ptr, int64_t val) {
     if(!lst) return lst_ptr;
     if(lst->length>=lst->capacity) {
         int64_t new_cap=lst->capacity*2;
-        OmniList* new_lst=(OmniList*)realloc(lst,sizeof(int64_t)*2+sizeof(int64_t)*(size_t)new_cap);
+        OmniList* new_lst=(OmniList*)omni_mem_realloc(lst,sizeof(int64_t)*2+sizeof(int64_t)*(size_t)new_cap);
         if(!new_lst){fprintf(stderr,"Fatal: OOM list_push\n");exit(1);}
         new_lst->capacity=new_cap; lst=new_lst;
     }
@@ -954,7 +955,7 @@ __attribute__((noinline)) int64_t omni_list_len(int64_t lst_ptr) {
 }
 __attribute__((noinline)) void omni_list_free(int64_t lst_ptr) {
     OmniList* lst=(OmniList*)(uintptr_t)lst_ptr;
-    if(lst) free(lst);
+    if(lst) omni_mem_free(lst);
 }
 __attribute__((noinline)) int64_t omni_list_contains(int64_t lst_ptr, int64_t val) {
     OmniList* lst=(OmniList*)(uintptr_t)lst_ptr;

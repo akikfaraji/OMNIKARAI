@@ -31,7 +31,7 @@ else
   KERNEL_FLAGS = -O3 -mavx2 -mfma
 endif
 
-SOURCES = src/main.c src/lexer.c src/parser.c src/codegen.c src/diag.c
+SOURCES = src/main.c src/lexer.c src/parser.c src/codegen.c src/diag.c src/omni_mem.c
 OMNICC  = bin/omnicc
 
 all: $(OMNICC)

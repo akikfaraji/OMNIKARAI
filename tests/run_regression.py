@@ -47,6 +47,7 @@ PROGRAMS = [
     ("r09_string_shims.ok",    ["HELLO, WORLD", "hello, world", "12", "dlroW ,olleH",
                                "hey, World", "1", "Hello"]),
     ("r10_exit_codes.ok",      ["before", "42"]),
+    ("r13_memory.ok",          ["1065353216", "6", "7", "ok", "7", "released"]),
 ]
 
 # JSON diagnostics golden checks:

@@ -1,0 +1,33 @@
+# REGRESSION r13 — runtime allocation funnel behavior
+# All runtime allocations (lists, AI buffers, int8) flow through the
+# V01.00 internal funnel (src/omni_mem.c): counters track and the
+# OMNI_MEM_DEBUG=1 poison mode is available; the ASan CI lane is the
+# memory-safety gate. This test pins observable behavior of alloc/use/
+# free cycles across subsystems. NOTE: a list.push + loop + string-
+# concat statement mix can still trigger the pinned-register corruption
+# class (TD-16, V01.11 register allocator) — shapes here stay clear of
+# that trigger; r09 covers runtime string results.
+# Expected: 1.5 6 7 7 ok 7 released
+use ai
+use list
+set a = ai.alloc(64)
+ai.set(a, 0, 1065353216)
+print(ai.get(a, 0))
+set l = list.new()
+for i in range(10):
+    list.push(l, i * 2)
+print(list.get(l, 3))
+list.free(l)
+set b = ai.alloc(128)
+set c = list.new()
+for i in range(10):
+    list.push(c, i)
+print(list.get(c, 7))
+list.free(c)
+ai.free(b)
+print("ok")
+set q = ai.alloc(8)
+ai.set_u8(q, 3, 7)
+print(ai.get_u8(q, 3))
+ai.free(q)
+print("released")
