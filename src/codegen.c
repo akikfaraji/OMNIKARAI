@@ -5361,7 +5361,7 @@ int64_t codegen_run(CodeGen*cg){
     /* TEMP DIAGNOSTIC (OMNI_JIT_DEBUG): capture callee-saved RBX + buffer
        checksum around the JIT call to attribute corruption precisely.
        Runs BEFORE mprotect so patch/save writes hit RW memory. */
-    long rbx_before=0, rbx_after=0;
+    long long rbx_before=0, rbx_after=0;
     int jitdbg = getenv("OMNI_JIT_DEBUG") != NULL;
     if (jitdbg) {
 #if defined(__x86_64__)
@@ -5401,7 +5401,7 @@ int64_t codegen_run(CodeGen*cg){
         omni_exec_free(mem,cg->code.size);
         return -1;
     }
-    long rbx_b2=0,r12_b2=0,r13_b2=0,r14_b2=0,r15_b2=0,rbp_b2=0,rsp_b2=0;
+    long long rbx_b2=0,r12_b2=0,r13_b2=0,r14_b2=0,r15_b2=0,rbp_b2=0,rsp_b2=0;
     if (jitdbg) {
 #if defined(__x86_64__)
         __asm__ volatile("mov %%rbx,%0\n mov %%r12,%1\n mov %%r13,%2\n mov %%r14,%3\n mov %%r15,%4\n mov %%rbp,%5\n mov %%rsp,%6"
@@ -5415,7 +5415,7 @@ int64_t codegen_run(CodeGen*cg){
     int64_t result=((OmniEntry)mem)();
     if (jitdbg) {
 #if defined(__x86_64__)
-        long rsp_after=0,rbp_a2=0,r12_a2=0,r13_a2=0,r14_a2=0,r15_a2=0;
+        long long rsp_after=0,rbp_a2=0,r12_a2=0,r13_a2=0,r14_a2=0,r15_a2=0;
         __asm__ volatile("mov %%rsp, %0\n mov %%rbp,%1\n mov %%r12,%2\n mov %%r13,%3\n mov %%r14,%4\n mov %%r15,%5"
                          : "=r"(rsp_after),"=r"(rbp_a2),"=r"(r12_a2),"=r"(r13_a2),"=r"(r14_a2),"=r"(r15_a2));
         __asm__ volatile("mov %%rbx, %0" : "=r"(rbx_after));
@@ -5428,10 +5428,10 @@ int64_t codegen_run(CodeGen*cg){
         if (getenv("OMNI_JIT_FRAME")) {
             /* Capture FIRST (no fprintf in between — its frames would
                overwrite the JIT's stale frame below rsp). */
-            long snap[32];
+            long long snap[32];
             for (int k = 0; k < 32; k++) snap[k] = *(long*)(rsp_after - 8 * (k + 1));
             for (int k = 0; k < 32; k++)
-                fprintf(stderr, "[jitdbg]   [rsp%+#lx] = %p\n", (long)(-8 * (k + 1)),
+                fprintf(stderr, "[jitdbg]   [rsp%+#llx] = %p\n", (long long)(-8 * (k + 1)),
                         (void*)(uintptr_t)snap[k]);
         }
 #else
